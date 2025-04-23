@@ -1,0 +1,105 @@
+dependencies:
+  dsi_init:
+    dependencies:
+    - name: espressif/esp_lcd_ili9881c
+      version: ^1.0.0
+    - name: espressif/esp_lcd_ek79007
+      version: ^1.0.0
+    - name: idf
+      version: '>=5.3.0'
+    source:
+      path: D:\dgx\espressif\Espressif\frameworks\esp-idf-v5.4\examples\peripherals\camera\camera_dsi\components\dsi_init
+      type: local
+    version: '*'
+  espressif/cmake_utilities:
+    component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.1'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 0.5.3
+  espressif/esp_cam_sensor:
+    component_hash: f5b7333b92c4a543c73ab7b7f3f09393717c746c577767e6b5197104379efb3b
+    dependencies:
+    - name: espressif/cmake_utilities
+      registry_url: https://components.espressif.com
+      require: private
+      version: 0.*
+    - name: espressif/esp_sccb_intf
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=0.0.2'
+    - name: idf
+      require: private
+      version: '>=5.3'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32p4
+    version: 0.5.5
+  espressif/esp_lcd_ek79007:
+    component_hash: 07c1afab7e9fd4dd2fd06ff9245e65327c5bbd5485efec199496e19a9304d47b
+    dependencies:
+    - name: espressif/cmake_utilities
+      registry_url: https://components.espressif.com
+      require: private
+      version: 0.*
+    - name: idf
+      require: private
+      version: '>=5.3'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32p4
+    version: 1.0.2
+  espressif/esp_lcd_ili9881c:
+    component_hash: f4f374226b62baf13f735864e8fae58e17c537df34d598e059f6caad4761ef65
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.3'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32p4
+    version: 1.0.1
+  espressif/esp_sccb_intf:
+    component_hash: 71e3def402f6193a23c599bdde4fa0b544ca2b1f63608b6d0ec2bee3cd9a1c33
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.3'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 0.0.5
+  idf:
+    source:
+      type: idf
+    version: 5.4.0
+  sensor_init:
+    dependencies:
+    - name: espressif/esp_cam_sensor
+      version: ^0.5.1
+    - name: idf
+      version: '>=5.3.0'
+    source:
+      path: D:\dgx\espressif\Espressif\frameworks\esp-idf-v5.4\examples\peripherals\camera\camera_dsi\components\sensor_init
+      type: local
+    version: '*'
+direct_dependencies:
+- dsi_init
+- espressif/esp_cam_sensor
+- espressif/esp_lcd_ek79007
+- espressif/esp_lcd_ili9881c
+- idf
+- sensor_init
+manifest_hash: f946796fe0fe92484044a6d2c4746034b81e36f78f2e3180367b03fe4b556085
+target: esp32p4
+version: 2.0.0
