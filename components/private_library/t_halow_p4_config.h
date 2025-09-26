@@ -1,0 +1,34 @@
+/*
+ * @Description: None
+ * @Author: LILYGO_L
+ * @Date: 2024-12-06 10:32:28
+ * @LastEditTime: 2025-09-25 11:29:46
+ */
+#pragma once
+
+////////////////////////////////////////////////// gpio config //////////////////////////////////////////////////
+
+// spi
+#define SPI_1_SCLK 27
+#define SPI_1_MOSI 26
+#define SPI_1_MISO 25
+
+//tx_ah_r900pnr
+#define TX_AH_R900PNR_CS 24
+#define TX_AH_R900PNR_INT 49
+#define TX_AH_R900PNR_SCLK SPI_1_SCLK
+#define TX_AH_R900PNR_MOSI SPI_1_MOSI
+#define TX_AH_R900PNR_MISO SPI_1_MISO
+#define TX_AH_R900PNR_DEBUG_UART_TX 51
+#define TX_AH_R900PNR_DEBUG_UART_RX 52
+
+// BOOT
+#define ESP32P4_BOOT 35
+
+
+
+////////////////////////////////////////////////// gpio config //////////////////////////////////////////////////
+
+////////////////////////////////////////////////// other define config //////////////////////////////////////////////////
+
+////////////////////////////////////////////////// other define config //////////////////////////////////////////////////

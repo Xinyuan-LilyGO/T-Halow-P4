@@ -1,6 +1,8 @@
+.devcontainer
+.vscode
 build
-managed_components
-.vscode/settings.json
-ESP32-P4-NANO_Demo/
-ESP32-P4-NANO_Demo.zip
 sdkconfig
+sdkconfig.old
+dependencies.lock
+managed_components
+.clangd

@@ -1,0 +1,10 @@
+menu "Example Configuration"
+
+    choice
+        prompt "Select the example to build"
+        default EXAMPLE_BUILD_TX_AH_R900PNR
+            config EXAMPLE_BUILD_TX_AH_R900PNR
+                bool "tx_ah_r900pnr"
+    endchoice
+
+endmenu
