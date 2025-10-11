@@ -246,7 +246,8 @@ static int sd_io_rw_extended(void *priv, const SDIO_CMD *cmd53, unsigned char *d
                     do
                     {
                         spidrv_read(priv, &r1, 1, CPU_TRANS);
-                        printf("[log debug]->[%s][%u line]: r1: %#X\n", __FILE__, __LINE__, r1);
+                        //这里校验r1必须读取为0XE5通信才是正确的
+                        // printf("[log debug]->[%s][%u line]: r1: %#X\n", __FILE__, __LINE__, r1);
                     } while (retry-- && ((r1 & 0x1f) != 0x05)); // crc status
                     err += ((r1 & 0x1f) != 0x05) ? 1 : 0;
                     if (err)

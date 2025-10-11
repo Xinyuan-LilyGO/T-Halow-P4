@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-09-19 14:20:25
- * @LastEditTime: 2025-09-26 11:11:31
+ * @LastEditTime: 2025-10-11 16:17:35
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -19,19 +19,15 @@ extern "C"
 #include "hgic_raw.h"
 }
 
-#define SPI_DATA_BUF_LEN (512 + 32)
-
 #define SOFTWARE_SPI_FREQ_HZ 1000000
 #define SOFTWARE_SPI_DELAY_US 1000000 / SOFTWARE_SPI_FREQ_HZ
-
-uint8_t spi_rx_buf[SPI_DATA_BUF_LEN];
-uint8_t spi_tx_buf[SPI_DATA_BUF_LEN];
 
 size_t Cycle_Time = 0;
 
 volatile bool Interrupt_Flag = false;
 
-auto Tx_Ah_R900pnr_Spi_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Spi>(TX_AH_R900PNR_MOSI, TX_AH_R900PNR_SCLK, TX_AH_R900PNR_MISO, SPI2_HOST, 0);
+auto Tx_Ah_R900pnr_Spi_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Spi>(TX_AH_R900PNR_MOSI, TX_AH_R900PNR_SCLK, TX_AH_R900PNR_MISO,
+                                                                            SPI2_HOST, 0, spi_clock_source_t ::SPI_CLK_SRC_SPLL);
 
 auto Uart_Bus_1 = std::make_shared<Cpp_Bus_Driver::Hardware_Uart>(TX_AH_R900PNR_DEBUG_UART_RX, TX_AH_R900PNR_DEBUG_UART_TX, UART_NUM_1);
 
@@ -82,13 +78,6 @@ void spidrv_write_read(void *priv, unsigned char *wdata, unsigned char *rdata, u
 
 void spidrv_write(void *priv, unsigned char *data, unsigned int len, char dma_flag)
 {
-    // printf("spidrv_write: [");
-    // for (unsigned int i = 0; i < len; ++i)
-    // {
-    //     printf("%#X ", data[i]);
-    // }
-    // printf("]\n");
-
     Tx_Ah_R900pnr_Spi_Bus->write(data, len);
 }
 
@@ -98,13 +87,6 @@ void spidrv_read(void *priv, unsigned char *data, unsigned int len, char dma_fla
     memset(buffer.get(), 0xFF, len);
 
     Tx_Ah_R900pnr_Spi_Bus->write_read(buffer.get(), data, len);
-
-    // printf("spidrv_read: [");
-    // for (unsigned int i = 0; i < len; ++i)
-    // {
-    //     printf("%#X ", data[i]);
-    // }
-    // printf("]\n");
 }
 
 // void spidrv_write(void *priv, unsigned char *data, unsigned int len, char dma_flag)
@@ -155,14 +137,14 @@ void spidrv_read(void *priv, unsigned char *data, unsigned int len, char dma_fla
 
 void spidrv_cs(void *priv, char enable)
 {
-    if (enable)
-    {
-        Tx_Ah_R900pnr_Spi_Bus->pin_write(TX_AH_R900PNR_CS, 0);
-    }
-    else
-    {
-        Tx_Ah_R900pnr_Spi_Bus->pin_write(TX_AH_R900PNR_CS, 1);
-    }
+    // if (enable)
+    // {
+    //     Tx_Ah_R900pnr_Spi_Bus->pin_write(TX_AH_R900PNR_CS, 0);
+    // }
+    // else
+    // {
+    //     Tx_Ah_R900pnr_Spi_Bus->pin_write(TX_AH_R900PNR_CS, 1);
+    // }
 }
 
 int spidrv_hw_crc(void *priv, unsigned char *data, unsigned int len, char flag)
@@ -172,9 +154,6 @@ int spidrv_hw_crc(void *priv, unsigned char *data, unsigned int len, char flag)
 
 int raw_send(unsigned char *data, unsigned int len)
 {
-    // spidrv_write(0, data, len, 0);
-    // return 0;
-
     return hgic_sdspi_write(0, data, len);
 }
 
@@ -182,10 +161,10 @@ extern "C" void app_main(void)
 {
     printf("Ciallo\n");
 
-    Tx_Ah_R900pnr_Spi_Bus->pin_mode(TX_AH_R900PNR_CS, Cpp_Bus_Driver::Tool::Pin_Mode::OUTPUT, Cpp_Bus_Driver::Tool::Pin_Status::PULLUP);
-    Tx_Ah_R900pnr_Spi_Bus->pin_mode(TX_AH_R900PNR_MOSI, Cpp_Bus_Driver::Tool::Pin_Mode::OUTPUT);
-    Tx_Ah_R900pnr_Spi_Bus->pin_mode(TX_AH_R900PNR_SCLK, Cpp_Bus_Driver::Tool::Pin_Mode::OUTPUT);
-    Tx_Ah_R900pnr_Spi_Bus->pin_mode(TX_AH_R900PNR_MISO, Cpp_Bus_Driver::Tool::Pin_Mode::INPUT);
+    // Tx_Ah_R900pnr_Spi_Bus->pin_mode(TX_AH_R900PNR_CS, Cpp_Bus_Driver::Tool::Pin_Mode::OUTPUT, Cpp_Bus_Driver::Tool::Pin_Status::PULLUP);
+    // Tx_Ah_R900pnr_Spi_Bus->pin_mode(TX_AH_R900PNR_MOSI, Cpp_Bus_Driver::Tool::Pin_Mode::OUTPUT);
+    // Tx_Ah_R900pnr_Spi_Bus->pin_mode(TX_AH_R900PNR_SCLK, Cpp_Bus_Driver::Tool::Pin_Mode::OUTPUT);
+    // Tx_Ah_R900pnr_Spi_Bus->pin_mode(TX_AH_R900PNR_MISO, Cpp_Bus_Driver::Tool::Pin_Mode::INPUT);
 
     Tx_Ah_R900pnr_Spi_Bus->create_gpio_interrupt(TX_AH_R900PNR_INT, Cpp_Bus_Driver::Tool::Interrupt_Mode::FALLING,
                                                  [](void *arg) -> IRAM_ATTR void
@@ -195,10 +174,11 @@ extern "C" void app_main(void)
 
     Uart_Bus_1->begin(115200);
 
-    Tx_Ah_R900pnr_Spi_Bus->begin(-1, -1);
+    // tx-ah模块通信频率必须为40mhz
+    Tx_Ah_R900pnr_Spi_Bus->begin(40000000, TX_AH_R900PNR_CS);
 
     // 等待sdio从设备初始化
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
     int32_t assert = hgic_sdspi_init(0);
     while (assert == -1)
@@ -207,31 +187,26 @@ extern "C" void app_main(void)
         assert = hgic_sdspi_init(0);
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
-
     printf("hgic_sdspi_init success\n");
 
-    // assert = hgic_raw_set_mode("ap");
-    // if (assert != 0)
-    // {
-    //     printf("hgic_raw_set_mode fail (error code: %ld)\n", assert);
-    // }
+    if (hgic_raw_get_fwinfo() == -1)
+    {
+        printf("hgic_raw_set_mode fail\n");
+    }
+    else
+    {
+        printf("hgic_raw_get_fwinfo success\n");
+    }
 
-    // while (hgic_raw_set_mode("ap") == -1)
+    // char mode[] = "ap";
+    // if (hgic_raw_set_mode(mode) == -1)
     // {
     //     printf("hgic_raw_set_mode fail\n");
-    //     hgic_raw_set_mode("ap");
-    //     vTaskDelay(pdMS_TO_TICKS(1000));
     // }
-
-    // int32_t buffer = hgic_raw_get_fwinfo();
-    // while (buffer == -1)
+    // else
     // {
-    //     printf("hgic_raw_get_fwinfo fail\n");
-    //     buffer = hgic_raw_get_fwinfo();
-    //     vTaskDelay(pdMS_TO_TICKS(1000));
+    //     printf("hgic_raw_set_mode success\n");
     // }
-
-    // printf("hgic_raw_get_fwinfo success (state: %ld)\n", buffer);
 
     // uart_flush_input(UART_NUM_0);
 
@@ -245,42 +220,25 @@ extern "C" void app_main(void)
 
         if (Interrupt_Flag == true)
         {
-            uint8_t test2_flag = 1;
-            uint32_t seed = 0;
-            uint32_t test_err = 0;
-            uint32_t tx_bytes = 0;
-            unsigned char *p_buf;
-            unsigned int p_len;
+            printf("Interrupt_Flag == true\n");
+            auto buffer = std::make_unique<unsigned char[]>(1024);
 
-            size_t read_len = hgic_sdspi_read(0, spi_rx_buf, sizeof(spi_rx_buf), 0);
-            printf("Interrupt_Flag == true (read_len: %d)\n", read_len);
-            if (read_len != -1 && read_len > 0)
+            size_t length = hgic_sdspi_read(0, buffer.get(), 1024, 0);
+
+            printf("spi receive length: %d\n", length);
+            if (length != static_cast<size_t>(-1) && length > 0)
             {
-                uint8_t *p_buf = spi_rx_buf;
-                uint32_t p_len = read_len;
-                if (hgic_raw_rx(&p_buf, &p_len) == HGIC_RAW_RX_TYPE_DATA)
-                {
-                    if (memcmp(spi_tx_buf, p_buf, p_len) != 0)
-                    {
-                        test_err++;
-                    }
-                    else
-                    {
-                        tx_bytes += 1024;
-                    }
-                    srand(seed++);
-                    for (uint32_t i = 0; i < 512; ++i)
-                    {
-                        spi_tx_buf[i] = rand() & 0xff;
-                    }
-                    test2_flag = 1;
+                unsigned char *buffer_p = buffer.get();
+                unsigned int length_2 = static_cast<unsigned int>(length);
 
-                    printf("received data (%lu bytes): ", p_len);
-                    for (uint32_t i = 0; i < p_len; ++i)
+                if (hgic_raw_rx(&buffer_p, &length_2) == HGIC_RAW_RX_TYPE_DATA)
+                {
+                    printf("spi receive data:[");
+                    for (uint32_t i = 0; i < length_2; i++)
                     {
-                        printf("%c ", p_buf[i]);
+                        printf("%c ", buffer_p[i]);
                     }
-                    printf("\n");
+                    printf("]\n");
                 }
             }
 
@@ -291,21 +249,17 @@ extern "C" void app_main(void)
         {
             printf("test data send start\n");
 
-            //     // printf("hgic_raw_test return: %d\n", hgic_raw_test((unsigned char *)"123456789", 10));
-            printf("hgic_raw_test2 return: %d\n", hgic_raw_test2((unsigned char *)"123456789", 10));
-            //     // printf("hgic_raw_test2 return: %d\n", hgic_raw_test2(spi_tx_buf, 512));
+            if (hgic_raw_test2((unsigned char *)"0123456789", 10) == -1)
+            {
+                printf("hgic_raw_test2 fail\n");
+            }
 
-            // int32_t buffer = hgic_raw_get_fwinfo();
-            // while (buffer == -1)
+            // if (hgic_raw_get_fwinfo() == -1)
             // {
             //     printf("hgic_raw_get_fwinfo fail\n");
-            //     buffer = hgic_raw_get_fwinfo();
-            //     vTaskDelay(pdMS_TO_TICKS(1000));
             // }
 
-            // printf("hgic_raw_get_fwinfo success (state: %ld)\n", buffer);
-
-            Cycle_Time = Tx_Ah_R900pnr_Spi_Bus->get_system_time_ms() + 1000;
+            Cycle_Time = Tx_Ah_R900pnr_Spi_Bus->get_system_time_ms() + 3000;
         }
 
         size_t uart_lenght = Uart_Bus_1->get_rx_buffer_length();
@@ -315,7 +269,7 @@ extern "C" void app_main(void)
             std::unique_ptr<char[]> buffer = std::make_unique<char[]>(uart_lenght + 1);
             Uart_Bus_1->read(buffer.get(), uart_lenght);
 
-            printf("uart receive lenght: %d receive: [%s]\n", uart_lenght, buffer.get());
+            printf("uart receive lenght: %d\nuart receive: [%s]\n", uart_lenght, buffer.get());
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));
