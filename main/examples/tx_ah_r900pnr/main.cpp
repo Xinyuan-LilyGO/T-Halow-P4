@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-09-19 14:20:25
- * @LastEditTime: 2025-10-11 16:17:35
+ * @LastEditTime: 2025-10-11 16:20:02
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -198,8 +198,7 @@ extern "C" void app_main(void)
         printf("hgic_raw_get_fwinfo success\n");
     }
 
-    // char mode[] = "ap";
-    // if (hgic_raw_set_mode(mode) == -1)
+    // if (hgic_raw_set_mode((char *)"ap") == -1)
     // {
     //     printf("hgic_raw_set_mode fail\n");
     // }
