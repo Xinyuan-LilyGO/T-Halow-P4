@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-09-19 14:20:25
- * @LastEditTime: 2025-10-13 11:42:50
+ * @LastEditTime: 2025-10-13 15:50:02
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -289,8 +289,8 @@ extern "C" void app_main(void)
             printf("total time elapsed: %.6f s\n", total_time_elapsed_s);
             printf("spi time elapsed: %.6f s\n", spi_time_elapsed_s);
             printf("total transmit data size: %.6f mbytes\n", total_transmit_bytes / (1024.0 * 1024.0));
-            printf("total speed: %.6f mbytes/s, %.6f mbps/s\n", total_speed_bytes / (1024.0 * 1024.0), total_speed_bps / (1000.0 * 1000.0));
-            printf("spi speed: %.6f mbytes/s, %.6f mbps/s\n", spi_speed_bytes / (1024.0 * 1024.0), spi_speed_bps / (1000.0 * 1000.0));
+            printf("total speed: %.6f mbytes/s, %.6f mbps\n", total_speed_bytes / (1024.0 * 1024.0), total_speed_bps / (1000.0 * 1000.0));
+            printf("spi speed: %.6f mbytes/s, %.6f mbps\n", spi_speed_bytes / (1024.0 * 1024.0), spi_speed_bps / (1000.0 * 1000.0));
             printf("failed packets: %d\n", total_failed_received_bytes);
             printf("----------------------------------------------------------------------\n");
 
