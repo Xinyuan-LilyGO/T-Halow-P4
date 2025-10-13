@@ -2,9 +2,11 @@ menu "Example Configuration"
 
     choice
         prompt "Select the example to build"
-        default EXAMPLE_BUILD_TX_AH_R900PNR
+        default EXAMPLE_BUILD_TX_AH_R900PNR_SPEED_TEST
             config EXAMPLE_BUILD_TX_AH_R900PNR
                 bool "tx_ah_r900pnr"
+            config EXAMPLE_BUILD_TX_AH_R900PNR_SPEED_TEST
+                bool "tx_ah_r900pnr_speed_test"
     endchoice
 
 endmenu

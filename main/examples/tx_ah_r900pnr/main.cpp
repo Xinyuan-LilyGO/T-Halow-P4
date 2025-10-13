@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-09-19 14:20:25
- * @LastEditTime: 2025-10-11 16:53:37
+ * @LastEditTime: 2025-10-13 11:43:37
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -21,6 +21,10 @@ extern "C"
 
 #define SOFTWARE_SPI_FREQ_HZ 1000000
 #define SOFTWARE_SPI_DELAY_US 1000000 / SOFTWARE_SPI_FREQ_HZ
+
+#define MAX_SPI_RECEIVE_SIZE std::min(HGIC_RAW_DATA_ROOM, HGIC_RAW_MAX_PAYLOAD)
+
+auto spidrv_read_buffer = std::make_unique<uint8_t[]>(MAX_SPI_RECEIVE_SIZE);
 
 size_t Cycle_Time = 0;
 
@@ -83,10 +87,7 @@ void spidrv_write(void *priv, unsigned char *data, unsigned int len, char dma_fl
 
 void spidrv_read(void *priv, unsigned char *data, unsigned int len, char dma_flag)
 {
-    auto buffer = std::make_unique<uint8_t[]>(len);
-    memset(buffer.get(), 0xFF, len);
-
-    Tx_Ah_R900pnr_Spi_Bus->write_read(buffer.get(), data, len);
+    Tx_Ah_R900pnr_Spi_Bus->write_read(spidrv_read_buffer.get(), data, len);
 }
 
 // void spidrv_write(void *priv, unsigned char *data, unsigned int len, char dma_flag)
@@ -174,6 +175,7 @@ extern "C" void app_main(void)
 
     Uart_Bus_1->begin(115200);
 
+    memset(spidrv_read_buffer.get(), 0xFF, MAX_SPI_RECEIVE_SIZE);
     // tx-ah模块通信频率必须为40mhz
     Tx_Ah_R900pnr_Spi_Bus->begin(40000000, TX_AH_R900PNR_CS);
 
