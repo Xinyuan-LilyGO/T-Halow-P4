@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Session Name="D:\GoogleDownload\AH-V1.6-SDK_20251031144239\AH-V1.6-SDK\hgSDK-v1.6.4.5-38054-fmac\hgSDK-v1.6.4.5-38054-fmac\project\txw4002a.cdkws">
+  <int Value="1" Name="m_selectedTab"/>
+  <wxString Value="D:\GoogleDownload\AH-V1.6-SDK_20251031144239\AH-V1.6-SDK\hgSDK-v1.6.4.5-38054-fmac\hgSDK-v1.6.4.5-38054-fmac\project\txw4002a.cdkws" Name="m_workspaceName"/>
+  <TabInfoArray Name="TabInfoArray">
+    <TabInfo>
+      <wxString Value="D:\GoogleDownload\AH-V1.6-SDK_20251031144239\AH-V1.6-SDK\hgSDK-v1.6.4.5-38054-fmac\hgSDK-v1.6.4.5-38054-fmac\project\sys_config.h" Name="FileName"/>
+      <wxString Value="txw4002a" Name="ProjectName"/>
+      <int Value="0" Name="FirstVisibleLine"/>
+      <int Value="1" Name="CurrentLine"/>
+      <wxArrayString Name="Bookmarks"/>
+      <IntVector Name="CollapsedFolds"/>
+    </TabInfo>
+    <TabInfo>
+      <wxString Value="D:\GoogleDownload\AH-V1.6-SDK_20251031144239\AH-V1.6-SDK\hgSDK-v1.6.4.5-38054-fmac\hgSDK-v1.6.4.5-38054-fmac\project\main.c" Name="FileName"/>
+      <wxString Value="txw4002a" Name="ProjectName"/>
+      <int Value="232" Name="FirstVisibleLine"/>
+      <int Value="215" Name="CurrentLine"/>
+      <wxArrayString Name="Bookmarks"/>
+      <IntVector Name="CollapsedFolds"/>
+    </TabInfo>
+  </TabInfoArray>
+  <SerializedObject Name="m_breakpoints">
+    <long Value="0" Name="Count"/>
+  </SerializedObject>
+</Session>
