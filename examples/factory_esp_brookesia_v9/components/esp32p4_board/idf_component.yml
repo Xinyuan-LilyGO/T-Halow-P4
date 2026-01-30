@@ -1,0 +1,27 @@
+dependencies:
+
+  espressif/esp_lvgl_port:
+    public: true
+    version: ^2
+
+  idf: '>=5.3'
+
+  lvgl/lvgl:
+    public: true
+    version: 9.2.*
+
+  # lvgl/lvgl: '>=8,<9'
+
+  esp_amoled_rm69a10:
+    version: "*"
+    path: ../esp_amoled_rm69a10
+
+  esp_lcd_touch_gt9895:
+    version: "*"
+    path: ../esp_lcd_touch_gt9895
+
+
+description: Board Support Package (BSP) for ESP32-P4 Board (Based on LVGL V8)
+targets:
+- esp32p4
+version: 1.0.0

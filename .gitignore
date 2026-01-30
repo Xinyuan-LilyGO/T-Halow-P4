@@ -1,6 +1,12 @@
 build
 managed_components
-.vscode/settings.json
-ESP32-P4-NANO_Demo/
-ESP32-P4-NANO_Demo.zip
+.vscode
 sdkconfig
+
+build
+managed_components
+AH-V1.6-SDK/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+

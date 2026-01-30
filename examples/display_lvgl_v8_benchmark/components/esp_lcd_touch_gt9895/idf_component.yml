@@ -1,0 +1,9 @@
+dependencies:
+  esp_lcd_touch:
+    public: true
+    version: ^1.1.0
+  idf:
+    version: '>=4.4.2'
+
+description: ESP LCD Touch GT9895 - touch controller GT9895
+version: 1.1.1

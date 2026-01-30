@@ -1,0 +1,11 @@
+dependencies:
+  cmake_utilities: 0.*
+  espressif/esp-ui:
+    public: true
+    version: 0.2.*
+  lvgl/lvgl:
+    public: true
+    version: '>=8.3,<9'
+description: This package provides a stylesheet for the esp-ui phone with a 568x1232
+  resolution.
+version: 0.2.0
