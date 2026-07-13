@@ -38,6 +38,8 @@ SPI 用于数据传输，使用的是泰芯官方的提供的驱动程序 [taixi
 
 UART 用于收发AT命令和显示运行信息，AT使用参考文档 [AT_cmd.md](./doc/AT_cmd.md)，更多细节参考[泰芯AH模组AT指令开发指南.pdf](./hardware/泰芯AH模组AT指令开发指南.pdf)
 
+这些 AT 命令也可以直接在浏览器中配置：[T-Halow Config](https://glassontin.github.io/thalow-config/)（[源码](https://github.com/GlassOnTin/thalow-config)）。它基于 Web Serial API，无需安装驱动或任何软件，仅需桌面版 Chrome 或 Edge。当信道超出所选频段范围、或发射功率超过该频段限值时，它会给出提示。界面支持简体中文。
+
 ![alt text](image-1.png)
 
 **2）AH-V1.6-SDK**

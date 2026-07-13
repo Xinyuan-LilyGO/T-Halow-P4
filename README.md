@@ -36,6 +36,8 @@ SPI is used for data transmission and uses the official Taixin driver
 UART is used to send and receive AT commands and to display runtime information.  
 For AT command usage, refer to [AT_cmd.md](./doc/AT_cmd.md). For more details, see [泰芯AH模组AT指令开发指南.pdf](./hardware/泰芯AH模组AT指令开发指南.pdf)
 
+These AT commands can also be driven from a browser: [T-Halow Config](https://glassontin.github.io/thalow-config/) ([source](https://github.com/GlassOnTin/thalow-config)). It uses the Web Serial API, so it needs no driver and nothing to install — only desktop Chrome or Edge. It warns when a channel would fall outside the selected regulatory band, or when the TX power exceeds it, and the interface is available in English, 简体中文, 日本語, Deutsch, Français and Español.
+
 ![alt text](image-1.png)
 
 **2）AH-V1.6-SDK**

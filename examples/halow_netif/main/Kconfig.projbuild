@@ -1,0 +1,32 @@
+menu "T-Halow-P4 HaLow netif example"
+
+config HALOW_ROLE_AP
+    bool "Configure the HaLow module as AP"
+    default n
+    help
+        Leave unset to run as a station. The radio's SSID, channel, bandwidth and
+        encryption are configured over the AT console, not here.
+
+config HALOW_USE_DHCP
+    bool "Obtain an address by DHCP"
+    default n
+    help
+        A bare HaLow BSS has no DHCP server. Enable this only when the AP-side
+        module bridges onto an ethernet segment that has one.
+
+config HALOW_STATIC_IP
+    string "Static IPv4 address"
+    depends on !HALOW_USE_DHCP
+    default "10.99.0.2"
+
+config HALOW_STATIC_NETMASK
+    string "Static IPv4 netmask"
+    depends on !HALOW_USE_DHCP
+    default "255.255.255.0"
+
+config HALOW_STATIC_GW
+    string "Static IPv4 gateway"
+    depends on !HALOW_USE_DHCP
+    default "10.99.0.1"
+
+endmenu
