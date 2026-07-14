@@ -62,6 +62,16 @@ void hgic_netif_set_link(esp_netif_t *netif, bool up);
  */
 void hgic_netif_input(esp_netif_t *netif, const void *frame, size_t len);
 
+/*
+ * The vendor driver is not re-entrant: TX and RX share hgic global state and the
+ * one SPI bus. TX (hgic_transmit) already serialises on this lock; the RX pump
+ * must take it too, or the two race -- harmless when both run on one core, but a
+ * corruption source once the pump is pinned to a second core. Wrap every SPI
+ * access in the RX task with these.
+ */
+void hgic_netif_spi_lock(void);
+void hgic_netif_spi_unlock(void);
+
 #ifdef __cplusplus
 }
 #endif

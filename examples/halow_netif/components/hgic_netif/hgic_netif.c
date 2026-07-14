@@ -17,8 +17,18 @@ static const char *TAG = "hgic_netif";
 
 typedef struct {
     esp_netif_driver_base_t base;
-    SemaphoreHandle_t tx_lock;
 } hgic_driver_t;
+
+/*
+ * Guards all access to the vendor driver's SPI bus and hgic global state --
+ * shared between TX (hgic_transmit, below) and the RX pump (via the exported
+ * hgic_netif_spi_lock/unlock). One module-wide instance: there is a single
+ * radio. Created in hgic_netif_create() before any TX or pump can run.
+ */
+static SemaphoreHandle_t s_spi_lock;
+
+void hgic_netif_spi_lock(void)   { xSemaphoreTake(s_spi_lock, portMAX_DELAY); }
+void hgic_netif_spi_unlock(void) { xSemaphoreGive(s_spi_lock); }
 
 /*
  * hgic_raw_send_ether() serialises into the single shared hgic.tx_buf, so it
@@ -28,15 +38,15 @@ typedef struct {
  */
 static esp_err_t hgic_transmit(void *h, void *buffer, size_t len)
 {
-    hgic_driver_t *drv = (hgic_driver_t *)h;
+    (void)h;
 
     if (len > HGIC_RAW_MAX_PAYLOAD) {
         return ESP_ERR_INVALID_SIZE;
     }
 
-    xSemaphoreTake(drv->tx_lock, portMAX_DELAY);
+    hgic_netif_spi_lock();
     int written = hgic_raw_send_ether((unsigned char *)buffer, (unsigned int)len);
-    xSemaphoreGive(drv->tx_lock);
+    hgic_netif_spi_unlock();
 
     return written > 0 ? ESP_OK : ESP_FAIL;
 }
@@ -84,7 +94,9 @@ esp_netif_t *hgic_netif_create(const uint8_t mac[6])
         return NULL;
     }
     drv->base.post_attach = hgic_post_attach;
-    drv->tx_lock = xSemaphoreCreateMutex();
+    if (s_spi_lock == NULL) {
+        s_spi_lock = xSemaphoreCreateMutex();
+    }
 
     if (esp_netif_attach(netif, drv) != ESP_OK) {
         ESP_LOGE(TAG, "esp_netif_attach failed");
