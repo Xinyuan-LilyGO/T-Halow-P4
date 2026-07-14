@@ -1,0 +1,48 @@
+menu "T-Halow-P4 HaLow router example"
+
+config ROUTER_WIFI_SSID
+    string "WiFi SoftAP SSID"
+    default "halow-router"
+
+config ROUTER_WIFI_PASSWORD
+    string "WiFi SoftAP password"
+    default "halowrouter"
+    help
+        WPA2-PSK, at least 8 characters. Leave empty for an open AP.
+
+config ROUTER_WIFI_CHANNEL
+    int "WiFi SoftAP channel"
+    range 1 13
+    default 1
+
+config HALOW_USE_DHCP
+    bool "Obtain a HaLow-side address by DHCP"
+    default n
+    help
+        A bare HaLow BSS has no DHCP server. Enable this only when the AP-side
+        module bridges onto an ethernet segment that has one.
+
+config HALOW_STATIC_IP
+    string "HaLow static IPv4 address"
+    depends on !HALOW_USE_DHCP
+    default "10.99.0.2"
+
+config HALOW_STATIC_NETMASK
+    string "HaLow static IPv4 netmask"
+    depends on !HALOW_USE_DHCP
+    default "255.255.255.0"
+
+config HALOW_STATIC_GW
+    string "HaLow static IPv4 gateway"
+    depends on !HALOW_USE_DHCP
+    default "10.99.0.1"
+
+config HALOW_DNS
+    string "DNS server offered to WiFi clients"
+    depends on !HALOW_USE_DHCP
+    default "8.8.8.8"
+    help
+        With a static HaLow address there is no DHCP lease to learn a DNS server
+        from, so this one is used by the router and offered to WiFi clients.
+
+endmenu

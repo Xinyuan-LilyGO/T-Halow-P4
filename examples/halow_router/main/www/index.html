@@ -1,0 +1,913 @@
+<!doctype html>
+<!--
+  T-Halow Config — on-device configurator for the T-Halow-P4 halow_router
+  example (Taixin TX-AH / HUGE-IC "WNB" firmware).
+
+  Adapted from the Web Serial configurator at
+  https://github.com/GlassOnTin/thalow-config: the serial transport is replaced
+  by the router firmware's POST /api/at bridge; everything else is unchanged.
+  Speaks only documented AT commands. Contains no vendor driver code.
+
+  Copyright (C) 2026 Ian Williams
+  Relicensed by the author from AGPL-3.0-or-later for this example.
+  SPDX-License-Identifier: GPL-3.0-or-later
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T-Halow Config</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --fg: #1a1a18; --muted: #6b6b66; --line: #dcdcd6;
+    --card: #ffffff; --accent: #2b6cb0; --ok: #2f7a4d; --warn: #9a6700; --err: #b42318;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17171a; --fg: #e8e8e4; --muted: #9a9a94; --line: #33333a;
+      --card: #1f1f24; --accent: #7aa7d9; --ok: #6cc08b; --warn: #e0b341; --err: #f0776a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 1.5rem 1rem 4rem; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", "Noto Sans", "Noto Sans SC", "Noto Sans JP", sans-serif;
+  }
+  main { max-width: 60rem; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1rem; margin: 0 0 .75rem; letter-spacing: .01em; }
+  .sub { color: var(--muted); margin: 0 0 1.5rem; }
+  .head { display: flex; align-items: flex-start; gap: 1rem; }
+  .head > div:first-child { flex: 1; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 1rem 1.15rem; margin-bottom: 1rem;
+  }
+  button {
+    font: inherit; padding: .45rem .9rem; border-radius: 7px; border: 1px solid var(--line);
+    background: var(--card); color: var(--fg); cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  label { display: block; font-size: .85rem; color: var(--muted); margin-bottom: .2rem; }
+  input, select {
+    font: inherit; width: 100%; padding: .4rem .5rem; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  }
+  #lang { width: auto; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: .75rem 1rem; }
+  .row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+  .mono, pre, code { font-family: var(--mono); font-size: .85rem; }
+  pre {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: .6rem .7rem; margin: 0; max-height: 16rem; overflow: auto; white-space: pre-wrap;
+  }
+  table { border-collapse: collapse; width: 100%; font-size: .88rem; }
+  td { padding: .22rem .5rem .22rem 0; vertical-align: top; }
+  td:first-child { color: var(--muted); width: 10rem; }
+  a { color: var(--accent); }
+  .note { border-left: 3px solid var(--line); padding: .5rem .75rem; margin: .6rem 0 0; font-size: .87rem; color: var(--muted); }
+  .warn { color: var(--warn); border-left-color: var(--warn); }
+  .err  { color: var(--err);  border-left-color: var(--err); }
+  .ok   { color: var(--ok); }
+  .pill { font-size: .78rem; padding: .1rem .5rem; border-radius: 999px; border: 1px solid var(--line); }
+  #rssiCanvas { width: 100%; height: 60px; display: block; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+  .hide { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <div class="head">
+    <div>
+      <h1 data-i18n="title">T-Halow Config</h1>
+      <p class="sub" data-i18n="subtitle">Configure this router's HaLow radio (Taixin TX-AH), served by the board itself. Nothing is installed; nothing leaves your network.</p>
+    </div>
+    <select id="lang" aria-label="Language">
+      <option value="en">English</option>
+      <option value="zh">简体中文</option>
+      <option value="ja">日本語</option>
+      <option value="de">Deutsch</option>
+      <option value="fr">Français</option>
+      <option value="es">Español</option>
+    </select>
+  </div>
+
+  <div id="unsupported" class="card err hide">
+    <strong data-i18n="unsupported.title">Web Serial unavailable.</strong>
+    <span data-i18n="unsupported.body">This page needs Chrome, Edge or Opera on desktop. Firefox and Safari do not implement Web Serial, and it is not available on Android. It also requires a secure context — use https:// or http://localhost.</span>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <button id="connect" class="primary" data-i18n="connect">Connect</button>
+      <button id="disconnect" disabled data-i18n="disconnect">Disconnect</button>
+      <span id="connState" class="pill" data-i18n="state.disconnected">disconnected</span>
+      <span style="flex:1"></span>
+      <button id="refresh" disabled data-i18n="refresh">Refresh status</button>
+    </div>
+    <p class="note" data-i18n="connect.note">This page talks to the radio through the router firmware, which bridges each command onto the module's AT UART. Connecting quietens the radio's periodic status dump (AT+SYSDBG=LMAC,0) and resynchronises the console before talking to it.</p>
+  </div>
+
+  <div class="card">
+    <h2 data-i18n="status.h">Status</h2>
+    <table id="statusTable"><tbody><tr><td>—</td><td class="mono" data-i18n="status.none">not connected</td></tr></tbody></table>
+    <div class="row" style="margin-top:.8rem">
+      <span class="mono" id="rssiNow">RSSI —</span>
+      <span class="mono" id="linkNow"></span>
+    </div>
+    <canvas id="rssiCanvas" height="60"></canvas>
+  </div>
+
+  <div class="card">
+    <h2 data-i18n="cfg.h">Configure</h2>
+    <div class="grid">
+      <div>
+        <label for="role" data-i18n="cfg.role">Role</label>
+        <select id="role">
+          <option value="ap" data-i18n="cfg.ap">AP</option>
+          <option value="sta" selected data-i18n="cfg.sta">STA</option>
+        </select>
+      </div>
+      <div>
+        <label for="ssid" data-i18n="cfg.ssid">SSID</label>
+        <input id="ssid" value="halowlink" maxlength="32">
+      </div>
+      <div>
+        <label for="region" data-i18n="cfg.region">Region</label>
+        <select id="region">
+          <option value="eu" selected data-i18n="region.eu">UK / EU — 863–868 MHz</option>
+          <option value="us" data-i18n="region.us">US — 902–928 MHz</option>
+          <option value="au" data-i18n="region.au">AU / NZ — 915–928 MHz</option>
+          <option value="none" data-i18n="region.none">No check</option>
+        </select>
+      </div>
+      <div>
+        <label for="freq" data-i18n="cfg.freq">Centre frequency (×0.1 MHz)</label>
+        <input id="freq" type="number" value="8660" step="10">
+      </div>
+      <div>
+        <label for="bw" data-i18n="cfg.bw">Bandwidth (MHz)</label>
+        <select id="bw"><option>1</option><option selected>2</option><option>4</option><option>8</option></select>
+      </div>
+      <div>
+        <label for="txpower" data-i18n="cfg.txp">TX power (dBm, 6–20)</label>
+        <input id="txpower" type="number" value="14" min="6" max="20">
+      </div>
+      <div>
+        <label for="psk" data-i18n="cfg.psk">PSK (64 hex chars, blank = open)</label>
+        <input id="psk" data-i18n-ph="cfg.pskPlaceholder" placeholder="open network" pattern="[0-9a-fA-F]{64}">
+      </div>
+    </div>
+
+    <div id="bandNote" class="note"></div>
+
+    <div class="row" style="margin-top:.9rem">
+      <label style="display:flex;gap:.4rem;align-items:center;margin:0;color:var(--fg)">
+        <input type="checkbox" id="loaddef" checked style="width:auto">
+        <span data-i18n="loaddef.label">Factory reset first (AT+LOADDEF=1)</span>
+      </label>
+    </div>
+    <p class="note" data-i18n="loaddef.note">Leave the factory reset on. Reconfiguring without it frequently leaves the two ends unable to associate, with no error on either side — the stored config is applied inconsistently. It costs about 12 seconds.</p>
+
+    <div class="row" style="margin-top:.9rem">
+      <button id="apply" class="primary" disabled data-i18n="apply">Apply to this board</button>
+      <button id="factory" disabled data-i18n="factory">Factory reset only</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 data-i18n="console.h">Console</h2>
+    <div class="row" style="margin-bottom:.6rem">
+      <input id="rawCmd" class="mono" placeholder="AT+WNBCFG" style="flex:1">
+      <button id="rawSend" disabled data-i18n="send">Send</button>
+      <button id="logClear" data-i18n="clear">Clear</button>
+    </div>
+    <pre id="log"></pre>
+  </div>
+
+  <div class="card">
+    <h2 data-i18n="docs.h">Documentation</h2>
+    <table>
+      <tr><td data-i18n="docs.board">Board</td><td>
+        <a href="https://github.com/Xinyuan-LilyGO/T-Halow-P4">T-Halow-P4</a> ·
+        <a href="https://github.com/Xinyuan-LilyGO/T-Halow">T-Halow (RJ45)</a> ·
+        <a href="https://lilygo.cc/products/t-halow-p4">LilyGo</a>
+      </td></tr>
+      <tr><td data-i18n="docs.at">AT commands</td><td>
+        <a href="https://github.com/Xinyuan-LilyGO/T-Halow-P4/blob/master/doc/AT_cmd.md">AT_cmd.md</a> ·
+        <a href="https://github.com/Xinyuan-LilyGO/T-Halow-P4/tree/master/hardware">hardware/</a> ·
+        <a href="https://www.taixin-semi.com/">泰芯 Taixin</a>
+      </td></tr>
+      <tr><td data-i18n="docs.ip">IP over HaLow</td><td>
+        <a href="https://github.com/Xinyuan-LilyGO/T-Halow-P4/pull/4">PR #4 — esp_netif</a> ·
+        <a href="https://github.com/Xinyuan-LilyGO/T-Halow-P4/issues/3">issue #3</a>
+      </td></tr>
+      <tr><td data-i18n="docs.ws">Web Serial</td><td>
+        <a href="https://developer.mozilla.org/en-US/docs/Web/API/Web_Serial_API">MDN</a> ·
+        <a href="https://wicg.github.io/serial/">spec</a> ·
+        <a href="https://caniuse.com/web-serial">support</a>
+      </td></tr>
+      <tr><td data-i18n="docs.this">This tool</td><td>
+        <a href="https://github.com/GlassOnTin/thalow-config">GlassOnTin/thalow-config</a>
+      </td></tr>
+    </table>
+  </div>
+
+  <p class="sub" style="font-size:.82rem" data-i18n="footer">GPL-3.0-or-later. Speaks only documented AT commands; contains no vendor driver code.</p>
+</main>
+
+<script type="module">
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---------------------------------------------------------------------------
+// i18n
+//
+// English and 简体中文 are written by hand. The remaining languages are
+// best-effort; corrections are very welcome.
+// Right-to-left languages are not handled (the layout has no dir="rtl" path).
+// ---------------------------------------------------------------------------
+
+const STRINGS = {
+  en: {
+    "title": "T-Halow Config",
+    "subtitle": "Configure this router's HaLow radio (Taixin TX-AH), served by the board itself. Nothing is installed; nothing leaves your network.",
+    "unsupported.title": "Web Serial unavailable.",
+    "unsupported.body": "This page needs Chrome, Edge or Opera on desktop. Firefox and Safari do not implement Web Serial, and it is not available on Android. It also requires a secure context — use https:// or http://localhost.",
+    "connect": "Connect", "disconnect": "Disconnect", "refresh": "Refresh status",
+    "state.connected": "connected", "state.disconnected": "disconnected",
+    "connect.note": "This page talks to the radio through the router firmware, which bridges each command onto the module's AT UART. Connecting quietens the radio's periodic status dump (AT+SYSDBG=LMAC,0) and resynchronises the console before talking to it.",
+    "status.h": "Status", "status.none": "not connected",
+    "status.fw": "Firmware", "status.role": "Role", "status.ssid": "SSID",
+    "status.chan": "Channel list", "status.bw": "Bandwidth", "status.enc": "Encryption",
+    "status.txp": "TX power", "status.mac": "MAC",
+    "status.open": "open", "status.on": "on", "status.nossid": "(none)",
+    "link.up": "link up", "link.down": "link down",
+    "cfg.h": "Configure", "cfg.role": "Role", "cfg.ap": "AP", "cfg.sta": "STA",
+    "cfg.ssid": "SSID", "cfg.region": "Region",
+    "cfg.freq": "Centre frequency (×0.1 MHz)", "cfg.bw": "Bandwidth (MHz)",
+    "cfg.txp": "TX power (dBm, 6–20)", "cfg.psk": "PSK (64 hex chars, blank = open)",
+    "cfg.pskPlaceholder": "open network",
+    "region.eu": "UK / EU 863–868 MHz", "region.us": "US 902–928 MHz",
+    "region.au": "AU / NZ 915–928 MHz", "region.none": "No check",
+    "band.ok": "{bw} MHz on {f} MHz spans {lo}–{hi} MHz — inside {region}.",
+    "band.out": "{bw} MHz centred on {f} MHz spans {lo}–{hi} MHz, outside {region}.",
+    "band.power": "{txp} dBm exceeds the {max} dBm normally permitted in {region}.",
+    "band.range": "AT+TXPOWER accepts 6–20 dBm.",
+    "band.off": "Regulatory check disabled.",
+    "loaddef.label": "Factory reset first (AT+LOADDEF=1)",
+    "loaddef.note": "Leave the factory reset on. Reconfiguring without it frequently leaves the two ends unable to associate, with no error on either side — the stored config is applied inconsistently. It costs about 12 seconds.",
+    "apply": "Apply to this board", "factory": "Factory reset only",
+    "apply.confirm": "The requested settings fail the regulatory check. Apply anyway?",
+    "factory.confirm": "Restore factory defaults? The board reboots to role=sta with no SSID.",
+    "console.h": "Console", "send": "Send", "clear": "Clear",
+    "log.ready": "Ready.",
+    "log.opened": "opened at 115200 8N1; resynchronising…",
+    "log.connected": "connected",
+    "log.noat": "no AT response — wrong port, or the board is not running firmware that bridges its AT UART",
+    "log.connfail": "connect failed: {e}",
+    "log.held": "  (is the board open in another tab?)",
+    "log.applying": "applying {n} settings…",
+    "log.applydone": "done — give it a few seconds, then watch the link state above",
+    "log.applyfail": "apply failed: {e}",
+    "log.resetstart": "AT+LOADDEF=1 — factory reset, board reboots (~12 s)",
+    "log.resetdone": "  reset complete",
+    "log.resetfail": "no AT response after factory reset",
+    "log.noreply": "(no reply)",
+    "docs.h": "Documentation", "docs.board": "Board", "docs.at": "AT commands",
+    "docs.ip": "IP over HaLow", "docs.ws": "Web Serial",
+    "docs.this": "This tool",
+    "footer": "GPL-3.0-or-later. Speaks only documented AT commands; contains no vendor driver code.",
+  },
+
+  zh: {
+    "title": "T-Halow 配置工具",
+    "subtitle": "配置本路由器的 HaLow 无线模块（泰芯 TX-AH），页面由开发板本身提供。无需安装任何软件；数据不会离开您的网络。",
+    "unsupported.title": "浏览器不支持 Web Serial。",
+    "unsupported.body": "本页面需要桌面版 Chrome、Edge 或 Opera。Firefox 与 Safari 未实现 Web Serial，Android 上也不可用。此外还需要安全上下文——请使用 https:// 或 http://localhost。",
+    "connect": "连接", "disconnect": "断开", "refresh": "刷新状态",
+    "state.connected": "已连接", "state.disconnected": "未连接",
+    "connect.note": "本页面通过路由器固件与模块通信：每条命令都由固件转发到模块的 AT 串口。连接时会先关闭模块的周期性状态打印（AT+SYSDBG=LMAC,0）并重新同步串口，然后再发送命令。",
+    "status.h": "状态", "status.none": "未连接",
+    "status.fw": "固件版本", "status.role": "角色", "status.ssid": "SSID",
+    "status.chan": "信道列表", "status.bw": "带宽", "status.enc": "加密",
+    "status.txp": "发射功率", "status.mac": "MAC 地址",
+    "status.open": "开放", "status.on": "已启用", "status.nossid": "（未设置）",
+    "link.up": "链路已建立", "link.down": "链路断开",
+    "cfg.h": "配置", "cfg.role": "角色", "cfg.ap": "AP（接入点）", "cfg.sta": "STA（终端）",
+    "cfg.ssid": "SSID", "cfg.region": "地区",
+    "cfg.freq": "中心频率（×0.1 MHz）", "cfg.bw": "带宽（MHz）",
+    "cfg.txp": "发射功率（dBm，6–20）", "cfg.psk": "PSK（64 位十六进制，留空为开放网络）",
+    "cfg.pskPlaceholder": "开放网络",
+    "region.eu": "英国 / 欧盟 863–868 MHz", "region.us": "美国 902–928 MHz",
+    "region.au": "澳大利亚 / 新西兰 915–928 MHz", "region.none": "不检查",
+    "band.ok": "{bw} MHz 带宽、中心频率 {f} MHz，占用 {lo}–{hi} MHz —— 在 {region} 频段内。",
+    "band.out": "{bw} MHz 带宽、中心频率 {f} MHz，占用 {lo}–{hi} MHz，超出 {region} 频段。",
+    "band.power": "{txp} dBm 超过了 {region} 通常允许的 {max} dBm。",
+    "band.range": "AT+TXPOWER 的取值范围为 6–20 dBm。",
+    "band.off": "已关闭频段合规检查。",
+    "loaddef.label": "先恢复出厂设置（AT+LOADDEF=1）",
+    "loaddef.note": "建议保持勾选。若不先恢复出厂设置，重新配置后两端常常无法关联，而且双方都不会报错——存储的配置会被不一致地应用。这一步大约需要 12 秒。",
+    "apply": "应用到此设备", "factory": "仅恢复出厂设置",
+    "apply.confirm": "当前设置未通过频段合规检查。仍要应用吗？",
+    "factory.confirm": "确定恢复出厂设置吗？模块将重启为 STA 角色，且不带 SSID。",
+    "console.h": "控制台", "send": "发送", "clear": "清除",
+    "log.ready": "就绪。",
+    "log.opened": "已以 115200 8N1 打开串口；正在重新同步……",
+    "log.connected": "已连接",
+    "log.noat": "没有 AT 响应——串口选错了，或者板子上的固件没有把模块的 AT 串口桥接出来",
+    "log.connfail": "连接失败：{e}",
+    "log.held": "  （该串口是否已被其他标签页占用？）",
+    "log.applying": "正在应用 {n} 项设置……",
+    "log.applydone": "完成——请稍候几秒，然后观察上方的链路状态",
+    "log.applyfail": "应用失败：{e}",
+    "log.resetstart": "AT+LOADDEF=1 —— 恢复出厂设置，模块将重启（约 12 秒）",
+    "log.resetdone": "  恢复完成",
+    "log.resetfail": "恢复出厂设置后没有 AT 响应",
+    "log.noreply": "（无响应）",
+    "docs.h": "文档", "docs.board": "开发板", "docs.at": "AT 指令",
+    "docs.ip": "HaLow 上的 IP", "docs.ws": "Web Serial",
+    "docs.this": "本工具",
+    "footer": "GPL-3.0-or-later 许可。仅发送公开文档中的 AT 指令；不含任何厂商驱动代码。",
+  },
+
+  ja: {
+    "title": "T-Halow 設定ツール",
+    "subtitle": "このルーターの HaLow 無線モジュール（Taixin TX-AH）を設定します。ページはボード自身が配信します。インストール不要、データはネットワーク外に送信されません。",
+    "unsupported.title": "Web Serial を利用できません。",
+    "unsupported.body": "デスクトップ版の Chrome、Edge、Opera が必要です。Firefox と Safari は Web Serial を実装しておらず、Android でも利用できません。また安全なコンテキストが必要です（https:// または http://localhost）。",
+    "connect": "接続", "disconnect": "切断", "refresh": "状態を更新",
+    "state.connected": "接続済み", "state.disconnected": "未接続",
+    "connect.note": "このページはルーターファームウェア経由で無線モジュールと通信します。各コマンドはファームウェアがモジュールの AT UART に中継します。接続時に周期的なステータス出力を停止し（AT+SYSDBG=LMAC,0）、コンソールを再同期してからコマンドを送ります。",
+    "status.h": "状態", "status.none": "未接続",
+    "status.fw": "ファームウェア", "status.role": "ロール", "status.ssid": "SSID",
+    "status.chan": "チャネル一覧", "status.bw": "帯域幅", "status.enc": "暗号化",
+    "status.txp": "送信出力", "status.mac": "MAC アドレス",
+    "status.open": "オープン", "status.on": "有効", "status.nossid": "（なし）",
+    "link.up": "リンク確立", "link.down": "リンク切断",
+    "cfg.h": "設定", "cfg.role": "ロール", "cfg.ap": "AP", "cfg.sta": "STA",
+    "cfg.ssid": "SSID", "cfg.region": "地域",
+    "cfg.freq": "中心周波数（×0.1 MHz）", "cfg.bw": "帯域幅（MHz）",
+    "cfg.txp": "送信出力（dBm、6–20）", "cfg.psk": "PSK（16 進 64 文字、空欄でオープン）",
+    "cfg.pskPlaceholder": "オープンネットワーク",
+    "region.eu": "英国 / EU 863–868 MHz", "region.us": "米国 902–928 MHz",
+    "region.au": "豪州 / NZ 915–928 MHz", "region.none": "チェックしない",
+    "band.ok": "中心 {f} MHz の {bw} MHz 幅は {lo}–{hi} MHz を占有します — {region} の範囲内です。",
+    "band.out": "中心 {f} MHz の {bw} MHz 幅は {lo}–{hi} MHz を占有し、{region} の範囲外です。",
+    "band.power": "{txp} dBm は {region} で通常許可される {max} dBm を超えています。",
+    "band.range": "AT+TXPOWER は 6–20 dBm を受け付けます。",
+    "band.off": "規制チェックは無効です。",
+    "loaddef.label": "先に工場出荷時設定に戻す（AT+LOADDEF=1）",
+    "loaddef.note": "有効のままにしてください。これを行わずに再設定すると、両端がアソシエートできなくなることが多く、しかもどちらにもエラーが出ません（保存済み設定が一貫せずに適用されます）。約 12 秒かかります。",
+    "apply": "このボードに適用", "factory": "工場出荷時設定に戻すのみ",
+    "apply.confirm": "設定が規制チェックに適合していません。それでも適用しますか？",
+    "factory.confirm": "工場出荷時設定に戻しますか？ ボードは SSID なしの STA として再起動します。",
+    "console.h": "コンソール", "send": "送信", "clear": "クリア",
+    "log.ready": "準備完了。",
+    "log.opened": "115200 8N1 で開きました。再同期しています…",
+    "log.connected": "接続しました",
+    "log.noat": "AT 応答がありません — ポートが違うか、AT UART をブリッジするファームウェアが動作していません",
+    "log.connfail": "接続に失敗しました: {e}",
+    "log.held": "  （別のタブがこのポートを開いていませんか？）",
+    "log.applying": "{n} 件の設定を適用しています…",
+    "log.applydone": "完了 — 数秒待ってから、上のリンク状態を確認してください",
+    "log.applyfail": "適用に失敗しました: {e}",
+    "log.resetstart": "AT+LOADDEF=1 — 工場出荷時設定に戻します。ボードが再起動します（約 12 秒）",
+    "log.resetdone": "  リセット完了",
+    "log.resetfail": "工場出荷時設定に戻した後、AT 応答がありません",
+    "log.noreply": "（応答なし）",
+    "docs.h": "ドキュメント", "docs.board": "ボード", "docs.at": "AT コマンド",
+    "docs.ip": "HaLow 上の IP", "docs.ws": "Web Serial",
+    "docs.this": "このツール",
+    "footer": "GPL-3.0-or-later。公開されている AT コマンドのみを使用し、ベンダードライバのコードは含みません。",
+  },
+
+  de: {
+    "title": "T-Halow Konfiguration",
+    "subtitle": "Konfiguriert das HaLow-Funkmodul (Taixin TX-AH) dieses Routers; die Seite wird vom Board selbst ausgeliefert. Nichts wird installiert; nichts verlässt Ihr Netzwerk.",
+    "unsupported.title": "Web Serial nicht verfügbar.",
+    "unsupported.body": "Diese Seite benötigt Chrome, Edge oder Opera auf dem Desktop. Firefox und Safari implementieren Web Serial nicht, und unter Android ist es nicht verfügbar. Außerdem ist ein sicherer Kontext nötig — https:// oder http://localhost.",
+    "connect": "Verbinden", "disconnect": "Trennen", "refresh": "Status aktualisieren",
+    "state.connected": "verbunden", "state.disconnected": "getrennt",
+    "connect.note": "Diese Seite spricht über die Router-Firmware mit dem Funkmodul; jeder Befehl wird von der Firmware auf die AT-UART des Moduls gebrückt. Beim Verbinden wird die periodische Statusausgabe abgeschaltet (AT+SYSDBG=LMAC,0) und die Konsole neu synchronisiert.",
+    "status.h": "Status", "status.none": "nicht verbunden",
+    "status.fw": "Firmware", "status.role": "Rolle", "status.ssid": "SSID",
+    "status.chan": "Kanalliste", "status.bw": "Bandbreite", "status.enc": "Verschlüsselung",
+    "status.txp": "Sendeleistung", "status.mac": "MAC",
+    "status.open": "offen", "status.on": "aktiv", "status.nossid": "(keine)",
+    "link.up": "Verbindung aktiv", "link.down": "Verbindung getrennt",
+    "cfg.h": "Konfigurieren", "cfg.role": "Rolle", "cfg.ap": "AP", "cfg.sta": "STA",
+    "cfg.ssid": "SSID", "cfg.region": "Region",
+    "cfg.freq": "Mittenfrequenz (×0,1 MHz)", "cfg.bw": "Bandbreite (MHz)",
+    "cfg.txp": "Sendeleistung (dBm, 6–20)", "cfg.psk": "PSK (64 Hex-Zeichen, leer = offen)",
+    "cfg.pskPlaceholder": "offenes Netz",
+    "region.eu": "UK / EU 863–868 MHz", "region.us": "USA 902–928 MHz",
+    "region.au": "AU / NZ 915–928 MHz", "region.none": "Keine Prüfung",
+    "band.ok": "{bw} MHz um {f} MHz belegt {lo}–{hi} MHz — innerhalb von {region}.",
+    "band.out": "{bw} MHz um {f} MHz belegt {lo}–{hi} MHz und liegt außerhalb von {region}.",
+    "band.power": "{txp} dBm überschreitet die in {region} üblichen {max} dBm.",
+    "band.range": "AT+TXPOWER akzeptiert 6–20 dBm.",
+    "band.off": "Regulatorische Prüfung deaktiviert.",
+    "loaddef.label": "Zuerst auf Werkseinstellungen zurücksetzen (AT+LOADDEF=1)",
+    "loaddef.note": "Aktiviert lassen. Ohne Zurücksetzen gelingt die Assoziation zwischen beiden Seiten häufig nicht, ohne dass eine Fehlermeldung erscheint — die gespeicherte Konfiguration wird inkonsistent übernommen. Es dauert etwa 12 Sekunden.",
+    "apply": "Auf dieses Board anwenden", "factory": "Nur zurücksetzen",
+    "apply.confirm": "Die Einstellungen bestehen die regulatorische Prüfung nicht. Trotzdem anwenden?",
+    "factory.confirm": "Werkseinstellungen wiederherstellen? Das Board startet als STA ohne SSID neu.",
+    "console.h": "Konsole", "send": "Senden", "clear": "Leeren",
+    "log.ready": "Bereit.",
+    "log.opened": "mit 115200 8N1 geöffnet; synchronisiere neu…",
+    "log.connected": "verbunden",
+    "log.noat": "keine AT-Antwort — falscher Port, oder die Firmware überbrückt die AT-UART nicht",
+    "log.connfail": "Verbindung fehlgeschlagen: {e}",
+    "log.held": "  (ist das Board in einem anderen Tab geöffnet?)",
+    "log.applying": "{n} Einstellungen werden angewendet…",
+    "log.applydone": "fertig — einige Sekunden warten, dann den Verbindungsstatus oben beobachten",
+    "log.applyfail": "Anwenden fehlgeschlagen: {e}",
+    "log.resetstart": "AT+LOADDEF=1 — Werksreset, das Board startet neu (~12 s)",
+    "log.resetdone": "  Reset abgeschlossen",
+    "log.resetfail": "keine AT-Antwort nach dem Werksreset",
+    "log.noreply": "(keine Antwort)",
+    "docs.h": "Dokumentation", "docs.board": "Board", "docs.at": "AT-Befehle",
+    "docs.ip": "IP über HaLow", "docs.ws": "Web Serial",
+    "docs.this": "Dieses Werkzeug",
+    "footer": "GPL-3.0-or-later. Verwendet nur dokumentierte AT-Befehle; enthält keinen Herstellertreiber-Code.",
+  },
+
+  fr: {
+    "title": "Configuration T-Halow",
+    "subtitle": "Configurez la radio HaLow (Taixin TX-AH) de ce routeur ; la page est servie par la carte elle-même. Rien n'est installé ; rien ne quitte votre réseau.",
+    "unsupported.title": "Web Serial indisponible.",
+    "unsupported.body": "Cette page nécessite Chrome, Edge ou Opera sur ordinateur. Firefox et Safari n'implémentent pas Web Serial, et il n'est pas disponible sur Android. Un contexte sécurisé est également requis — https:// ou http://localhost.",
+    "connect": "Connecter", "disconnect": "Déconnecter", "refresh": "Actualiser l'état",
+    "state.connected": "connecté", "state.disconnected": "déconnecté",
+    "connect.note": "Cette page communique avec la radio via le micrologiciel du routeur, qui relaie chaque commande vers l'UART AT du module. La connexion coupe d'abord l'affichage périodique d'état (AT+SYSDBG=LMAC,0) et resynchronise la console.",
+    "status.h": "État", "status.none": "non connecté",
+    "status.fw": "Micrologiciel", "status.role": "Rôle", "status.ssid": "SSID",
+    "status.chan": "Liste de canaux", "status.bw": "Largeur de bande", "status.enc": "Chiffrement",
+    "status.txp": "Puissance d'émission", "status.mac": "MAC",
+    "status.open": "ouvert", "status.on": "activé", "status.nossid": "(aucun)",
+    "link.up": "liaison établie", "link.down": "liaison coupée",
+    "cfg.h": "Configurer", "cfg.role": "Rôle", "cfg.ap": "AP", "cfg.sta": "STA",
+    "cfg.ssid": "SSID", "cfg.region": "Région",
+    "cfg.freq": "Fréquence centrale (×0,1 MHz)", "cfg.bw": "Largeur de bande (MHz)",
+    "cfg.txp": "Puissance d'émission (dBm, 6–20)", "cfg.psk": "PSK (64 caractères hex, vide = ouvert)",
+    "cfg.pskPlaceholder": "réseau ouvert",
+    "region.eu": "RU / UE 863–868 MHz", "region.us": "États-Unis 902–928 MHz",
+    "region.au": "AU / NZ 915–928 MHz", "region.none": "Aucune vérification",
+    "band.ok": "{bw} MHz centrés sur {f} MHz occupent {lo}–{hi} MHz — à l'intérieur de {region}.",
+    "band.out": "{bw} MHz centrés sur {f} MHz occupent {lo}–{hi} MHz, en dehors de {region}.",
+    "band.power": "{txp} dBm dépasse les {max} dBm normalement autorisés en {region}.",
+    "band.range": "AT+TXPOWER accepte 6–20 dBm.",
+    "band.off": "Vérification réglementaire désactivée.",
+    "loaddef.label": "Réinitialiser d'abord (AT+LOADDEF=1)",
+    "loaddef.note": "Laissez cette option activée. Sans réinitialisation, les deux extrémités échouent souvent à s'associer, sans aucune erreur de part et d'autre — la configuration enregistrée est appliquée de façon incohérente. Cela prend environ 12 secondes.",
+    "apply": "Appliquer à cette carte", "factory": "Réinitialiser seulement",
+    "apply.confirm": "Les réglages ne passent pas la vérification réglementaire. Appliquer quand même ?",
+    "factory.confirm": "Restaurer les réglages d'usine ? La carte redémarre en STA sans SSID.",
+    "console.h": "Console", "send": "Envoyer", "clear": "Effacer",
+    "log.ready": "Prêt.",
+    "log.opened": "ouvert à 115200 8N1 ; resynchronisation…",
+    "log.connected": "connecté",
+    "log.noat": "aucune réponse AT — mauvais port, ou le micrologiciel ne relaie pas l'UART AT",
+    "log.connfail": "échec de la connexion : {e}",
+    "log.held": "  (la carte est-elle ouverte dans un autre onglet ?)",
+    "log.applying": "application de {n} réglages…",
+    "log.applydone": "terminé — patientez quelques secondes, puis observez l'état de la liaison ci-dessus",
+    "log.applyfail": "échec de l'application : {e}",
+    "log.resetstart": "AT+LOADDEF=1 — réinitialisation d'usine, la carte redémarre (~12 s)",
+    "log.resetdone": "  réinitialisation terminée",
+    "log.resetfail": "aucune réponse AT après la réinitialisation",
+    "log.noreply": "(aucune réponse)",
+    "docs.h": "Documentation", "docs.board": "Carte", "docs.at": "Commandes AT",
+    "docs.ip": "IP sur HaLow", "docs.ws": "Web Serial",
+    "docs.this": "Cet outil",
+    "footer": "GPL-3.0-or-later. N'utilise que des commandes AT documentées ; ne contient aucun code de pilote du fabricant.",
+  },
+
+  es: {
+    "title": "Configuración T-Halow",
+    "subtitle": "Configura la radio HaLow (Taixin TX-AH) de este router; la página la sirve la propia placa. No se instala nada; nada sale de tu red.",
+    "unsupported.title": "Web Serial no disponible.",
+    "unsupported.body": "Esta página necesita Chrome, Edge u Opera en escritorio. Firefox y Safari no implementan Web Serial, y no está disponible en Android. También requiere un contexto seguro — https:// o http://localhost.",
+    "connect": "Conectar", "disconnect": "Desconectar", "refresh": "Actualizar estado",
+    "state.connected": "conectado", "state.disconnected": "desconectado",
+    "connect.note": "Esta página se comunica con la radio a través del firmware del router, que reenvía cada comando a la UART AT del módulo. Al conectar se silencia el volcado periódico de estado (AT+SYSDBG=LMAC,0) y se resincroniza la consola.",
+    "status.h": "Estado", "status.none": "no conectado",
+    "status.fw": "Firmware", "status.role": "Rol", "status.ssid": "SSID",
+    "status.chan": "Lista de canales", "status.bw": "Ancho de banda", "status.enc": "Cifrado",
+    "status.txp": "Potencia de transmisión", "status.mac": "MAC",
+    "status.open": "abierta", "status.on": "activado", "status.nossid": "(ninguno)",
+    "link.up": "enlace activo", "link.down": "enlace caído",
+    "cfg.h": "Configurar", "cfg.role": "Rol", "cfg.ap": "AP", "cfg.sta": "STA",
+    "cfg.ssid": "SSID", "cfg.region": "Región",
+    "cfg.freq": "Frecuencia central (×0,1 MHz)", "cfg.bw": "Ancho de banda (MHz)",
+    "cfg.txp": "Potencia de transmisión (dBm, 6–20)", "cfg.psk": "PSK (64 caracteres hex, vacío = abierta)",
+    "cfg.pskPlaceholder": "red abierta",
+    "region.eu": "RU / UE 863–868 MHz", "region.us": "EE. UU. 902–928 MHz",
+    "region.au": "AU / NZ 915–928 MHz", "region.none": "Sin comprobación",
+    "band.ok": "{bw} MHz centrados en {f} MHz ocupan {lo}–{hi} MHz — dentro de {region}.",
+    "band.out": "{bw} MHz centrados en {f} MHz ocupan {lo}–{hi} MHz, fuera de {region}.",
+    "band.power": "{txp} dBm supera los {max} dBm normalmente permitidos en {region}.",
+    "band.range": "AT+TXPOWER acepta 6–20 dBm.",
+    "band.off": "Comprobación normativa desactivada.",
+    "loaddef.label": "Restablecer de fábrica primero (AT+LOADDEF=1)",
+    "loaddef.note": "Déjalo activado. Sin restablecer, los dos extremos a menudo no consiguen asociarse, sin ningún error en ninguno de los dos — la configuración guardada se aplica de forma inconsistente. Tarda unos 12 segundos.",
+    "apply": "Aplicar a esta placa", "factory": "Solo restablecer de fábrica",
+    "apply.confirm": "Los ajustes no superan la comprobación normativa. ¿Aplicar de todos modos?",
+    "factory.confirm": "¿Restaurar valores de fábrica? La placa reinicia como STA sin SSID.",
+    "console.h": "Consola", "send": "Enviar", "clear": "Limpiar",
+    "log.ready": "Listo.",
+    "log.opened": "abierto a 115200 8N1; resincronizando…",
+    "log.connected": "conectado",
+    "log.noat": "sin respuesta AT — puerto incorrecto, o el firmware no puentea la UART AT",
+    "log.connfail": "fallo al conectar: {e}",
+    "log.held": "  (¿está la placa abierta en otra pestaña?)",
+    "log.applying": "aplicando {n} ajustes…",
+    "log.applydone": "hecho — espera unos segundos y observa el estado del enlace arriba",
+    "log.applyfail": "fallo al aplicar: {e}",
+    "log.resetstart": "AT+LOADDEF=1 — restablecimiento de fábrica, la placa reinicia (~12 s)",
+    "log.resetdone": "  restablecimiento completo",
+    "log.resetfail": "sin respuesta AT tras el restablecimiento",
+    "log.noreply": "(sin respuesta)",
+    "docs.h": "Documentación", "docs.board": "Placa", "docs.at": "Comandos AT",
+    "docs.ip": "IP sobre HaLow", "docs.ws": "Web Serial",
+    "docs.this": "Esta herramienta",
+    "footer": "GPL-3.0-or-later. Solo usa comandos AT documentados; no contiene código del controlador del fabricante.",
+  },
+};
+
+let lang = "en";
+
+const t = (key, vars) => {
+  let s = (STRINGS[lang] && STRINGS[lang][key]) || STRINGS.en[key] || key;
+  if (vars) for (const [k, v] of Object.entries(vars)) s = s.replaceAll(`{${k}}`, v);
+  return s;
+};
+
+function applyLang(next) {
+  lang = STRINGS[next] ? next : "en";
+  document.documentElement.lang = lang;
+  localStorage.setItem("thalow.lang", lang);
+  for (const el of document.querySelectorAll("[data-i18n]")) el.textContent = t(el.dataset.i18n);
+  for (const el of document.querySelectorAll("[data-i18n-ph]")) el.placeholder = t(el.dataset.i18nPh);
+  $("connState").textContent = t(port ? "state.connected" : "state.disconnected");
+  checkBand();
+  // Re-render from the cached reply rather than calling refreshStatus(), which
+  // bails out whenever the 1.5 s poll timer happens to hold `busy`.
+  renderStatusRows();
+  if (lastLinkUp !== null) setLinkLabel(lastLinkUp);
+}
+
+function detectLang() {
+  const saved = localStorage.getItem("thalow.lang");
+  if (saved && STRINGS[saved]) return saved;
+  for (const l of navigator.languages || [navigator.language || "en"]) {
+    const base = l.toLowerCase().split("-")[0];
+    if (STRINGS[base]) return base;
+  }
+  return "en";
+}
+
+// ---------------------------------------------------------------------------
+// AT transport
+// ---------------------------------------------------------------------------
+
+class AtPort {
+  // On-device transport: the router firmware bridges POST /api/at onto the
+  // module's AT UART and returns the collected reply as text. The quiet-time
+  // collection that the Web Serial version did here runs in the firmware.
+
+  static supported() { return true; }
+  static async request() { return new AtPort(); }
+  static async existing() { return new AtPort(); }
+
+  async open() { /* nothing to open; the AT bridge lives in the firmware */ }
+  async close() {}
+
+  async cmd(line, quietMs = 250, maxMs = 1800) {
+    const r = await fetch(`/api/at?quiet=${quietMs}&max=${maxMs}`, { method: "POST", body: line });
+    if (!r.ok) throw new Error(`api/at ${r.status}`);
+    return r.text();
+  }
+
+  /**
+   * Recover a console stuck in AT+TXDATA data-mode, or one drowning in debug
+   * output. The 0x55-filler feed runs server-side.
+   */
+  async resync() {
+    const r = await fetch("/api/resync", { method: "POST" });
+    return r.ok && (await r.text()).includes("OK");
+  }
+
+  /** Stop the periodic LMAC/WNB status dump so replies are parseable. */
+  async quiet() {
+    await this.cmd("AT+SYSDBG=LMAC,0", 200, 900);
+    await this.cmd("AT+SYSDBG=WNB,0", 200, 900);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Parsing
+// ---------------------------------------------------------------------------
+
+/** Pull `key:value` pairs out of an AT+WNBCFG block. */
+function parseWnbcfg(text) {
+  const out = {};
+  for (const m of text.matchAll(/(\w+)\s*:\s*([^,\r\n]*)/g)) out[m[1]] = m[2].trim();
+  return out;
+}
+
+const REPLY = (text, key) => (text.match(new RegExp(`\\+${key}:\\s*([^\\r\\n]*)`)) || [, ""])[1].trim();
+
+// ---------------------------------------------------------------------------
+// Regulatory checks
+// ---------------------------------------------------------------------------
+
+// Ranges in units of 0.1 MHz, and the usual conducted/ERP ceiling in dBm.
+const REGIONS = {
+  eu:   { key: "region.eu", lo: 8630, hi: 8680, maxDbm: 14 },
+  us:   { key: "region.us", lo: 9020, hi: 9280, maxDbm: 20 },
+  au:   { key: "region.au", lo: 9150, hi: 9280, maxDbm: 20 },
+  none: null,
+};
+
+function checkBand() {
+  const region = REGIONS[$("region").value];
+  const freq = Number($("freq").value);      // 0.1 MHz units
+  const bw = Number($("bw").value);          // MHz
+  const txp = Number($("txpower").value);
+  const el = $("bandNote");
+
+  const halfSpan = bw * 5;                   // MHz/2, in 0.1 MHz units
+  const lo = freq - halfSpan, hi = freq + halfSpan;
+  const fmt = (v) => (v / 10).toFixed(1);
+  const problems = [];
+
+  if (region) {
+    const name = t(region.key);
+    if (lo < region.lo || hi > region.hi) {
+      problems.push(t("band.out", { bw, f: fmt(freq), lo: fmt(lo), hi: fmt(hi), region: name }));
+    }
+    if (txp > region.maxDbm) {
+      problems.push(t("band.power", { txp, max: region.maxDbm, region: name }));
+    }
+  }
+  if (txp < 6 || txp > 20) problems.push(t("band.range"));
+
+  el.className = problems.length ? "note warn" : "note";
+  el.textContent = problems.length
+    ? problems.join(" ")
+    : region
+      ? t("band.ok", { bw, f: fmt(freq), lo: fmt(lo), hi: fmt(hi), region: t(region.key) })
+      : t("band.off");
+  return problems.length === 0;
+}
+
+// ---------------------------------------------------------------------------
+// UI
+// ---------------------------------------------------------------------------
+
+let port = null, polling = null, busy = false;
+const rssiHistory = [];
+
+// Cached so a language change can re-label the UI without re-reading the board.
+let lastCfg = null, lastVersion = "", lastMode = "", lastLinkUp = null;
+
+function log(line, cls) {
+  const pre = $("log");
+  const span = document.createElement("span");
+  span.textContent = line + "\n";
+  if (cls) span.className = cls;
+  pre.appendChild(span);
+  pre.scrollTop = pre.scrollHeight;
+}
+
+function setConnected(on) {
+  $("connect").disabled = on;
+  for (const id of ["disconnect", "refresh", "apply", "factory", "rawSend"]) $(id).disabled = !on;
+  $("connState").textContent = t(on ? "state.connected" : "state.disconnected");
+  $("connState").className = on ? "pill ok" : "pill";
+}
+
+function renderStatus(rows) {
+  const tb = $("statusTable").querySelector("tbody");
+  tb.innerHTML = "";
+  for (const [k, v] of rows) {
+    const tr = document.createElement("tr");
+    const a = document.createElement("td"); a.textContent = k;
+    const b = document.createElement("td"); b.className = "mono"; b.textContent = v;
+    tr.append(a, b); tb.appendChild(tr);
+  }
+}
+
+function drawRssi() {
+  const c = $("rssiCanvas");
+  const dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  c.width = w * dpr; c.height = h * dpr;
+  const g = c.getContext("2d");
+  g.scale(dpr, dpr);
+  g.clearRect(0, 0, w, h);
+  if (rssiHistory.length < 2) return;
+
+  // Map -100..-20 dBm onto the canvas height.
+  const y = (v) => h - ((Math.max(-100, Math.min(-20, v)) + 100) / 80) * h;
+  const step = w / Math.max(1, rssiHistory.length - 1);
+  g.strokeStyle = getComputedStyle(document.body).getPropertyValue("--accent").trim();
+  g.lineWidth = 1.5;
+  g.beginPath();
+  rssiHistory.forEach((v, i) => (i ? g.lineTo(i * step, y(v)) : g.moveTo(0, y(v))));
+  g.stroke();
+}
+
+/** Redraw the status table from the last reply, in the current language. */
+function renderStatusRows() {
+  if (!lastCfg) return;
+  const cfg = lastCfg;
+  renderStatus([
+    [t("status.fw"), lastVersion || "?"],
+    [t("status.role"), cfg.role || lastMode || "?"],
+    [t("status.ssid"), cfg.ssid || t("status.nossid")],
+    [t("status.chan"), cfg.chan_list || "?"],
+    [t("status.bw"), cfg.bss_bw ? cfg.bss_bw + " MHz" : "?"],
+    [t("status.enc"), cfg.encrypt === "0" ? t("status.open") : t("status.on")],
+    [t("status.txp"), cfg.tx_power ? cfg.tx_power + " dBm" : "?"],
+    [t("status.mac"), cfg.addr || "?"],
+  ]);
+}
+
+async function refreshStatus() {
+  if (!port || busy) return;
+  busy = true;
+  try {
+    const ver = await port.cmd("AT+VERSION", 250, 1500);
+    const mode = await port.cmd("AT+MODE", 250, 1200);
+    const cfgText = await port.cmd("AT+WNBCFG", 350, 2500);
+    lastVersion = REPLY(ver, "VERSION");
+    lastMode = REPLY(mode, "MODE");
+    lastCfg = parseWnbcfg(cfgText);
+    renderStatusRows();
+  } finally { busy = false; }
+}
+
+function setLinkLabel(up) {
+  lastLinkUp = up;
+  $("linkNow").textContent = t(up ? "link.up" : "link.down");
+  $("linkNow").className = "mono " + (up ? "ok" : "");
+}
+
+async function pollLink() {
+  if (!port || busy) return;
+  busy = true;
+  try {
+    const cs = await port.cmd("AT+CONN_STATE", 200, 1200);
+    const rs = await port.cmd("AT+RSSI", 200, 1200);
+    setLinkLabel(cs.includes("+CONNECTED"));
+
+    const rssi = Number(REPLY(rs, "RSSI"));
+    if (Number.isFinite(rssi) && rssi !== 0) {
+      $("rssiNow").textContent = `RSSI ${rssi} dBm`;
+      rssiHistory.push(rssi);
+      if (rssiHistory.length > 120) rssiHistory.shift();
+      drawRssi();
+    } else {
+      $("rssiNow").textContent = "RSSI —";
+    }
+  } catch { /* transient */ } finally { busy = false; }
+}
+
+async function runSteps(steps) {
+  for (const s of steps) {
+    const r = await port.cmd(s, 250, 2500);
+    const ok = r.includes("OK");
+    log(`  ${s.padEnd(24)} -> ${ok ? "OK" : r.trim().split("\n")[0] || t("log.noreply")}`, ok ? "ok" : "err");
+  }
+}
+
+async function factoryReset() {
+  log(t("log.resetstart"));
+  await port.cmd("AT+LOADDEF=1", 500, 4000);
+  await sleep(12000);
+  if (!(await port.resync())) throw new Error(t("log.resetfail"));
+  await port.quiet();
+  log(t("log.resetdone"), "ok");
+}
+
+async function connectWith(candidate) {
+  if (!candidate) return false;
+  port = candidate;
+  try {
+    await port.open();
+    log(t("log.opened"));
+    if (!(await port.resync())) {
+      log(t("log.noat"), "err");
+      await port.close(); port = null;
+      return false;
+    }
+    await port.quiet();
+    setConnected(true);
+    log(t("log.connected"), "ok");
+    await refreshStatus();
+    polling = setInterval(pollLink, 1500);
+    return true;
+  } catch (e) {
+    // A serial port can be held by only one page at a time.
+    log(t("log.connfail", { e: e.message }), "err");
+    if (/open/i.test(e.message)) log(t("log.held"), "err");
+    port = null;
+    return false;
+  }
+}
+
+// --- wiring -----------------------------------------------------------------
+
+if (!AtPort.supported()) {
+  $("unsupported").classList.remove("hide");
+  $("connect").disabled = true;
+}
+
+$("lang").value = detectLang();
+applyLang($("lang").value);
+log(t("log.ready"));
+$("lang").addEventListener("change", () => applyLang($("lang").value));
+
+for (const id of ["region", "freq", "bw", "txpower"]) $(id).addEventListener("input", checkBand);
+
+$("connect").addEventListener("click", async () => {
+  try { await connectWith(await AtPort.request()); }
+  catch (e) { log(t("log.connfail", { e: e.message }), "err"); port = null; }
+});
+
+$("disconnect").addEventListener("click", async () => {
+  clearInterval(polling); polling = null;
+  await port?.close(); port = null;
+  setConnected(false);
+});
+
+$("refresh").addEventListener("click", refreshStatus);
+
+$("apply").addEventListener("click", async () => {
+  if (!checkBand() && !confirm(t("apply.confirm"))) return;
+
+  clearInterval(polling); polling = null;
+  $("apply").disabled = true; $("factory").disabled = true;
+  try {
+    if ($("loaddef").checked) await factoryReset();
+
+    const psk = $("psk").value.trim();
+    const steps = [
+      `AT+MODE=${$("role").value}`,
+      `AT+SSID=${$("ssid").value}`,
+      ...(psk ? ["AT+KEYMGMT=WPA-PSK", `AT+PSK=${psk}`] : ["AT+KEYMGMT=NONE"]),
+      `AT+CHAN_LIST=${$("freq").value}`,
+      `AT+BSS_BW=${$("bw").value}`,
+      `AT+TXPOWER=${$("txpower").value}`,
+    ];
+    log(t("log.applying", { n: steps.length }));
+    await runSteps(steps);
+    log(t("log.applydone"), "ok");
+    await refreshStatus();
+  } catch (e) {
+    log(t("log.applyfail", { e: e.message }), "err");
+  } finally {
+    $("apply").disabled = false; $("factory").disabled = false;
+    polling = setInterval(pollLink, 1500);
+  }
+});
+
+$("factory").addEventListener("click", async () => {
+  if (!confirm(t("factory.confirm"))) return;
+  clearInterval(polling); polling = null;
+  $("apply").disabled = true; $("factory").disabled = true;
+  try { await factoryReset(); await refreshStatus(); }
+  catch (e) { log(t("log.applyfail", { e: e.message }), "err"); }
+  finally {
+    $("apply").disabled = false; $("factory").disabled = false;
+    polling = setInterval(pollLink, 1500);
+  }
+});
+
+$("rawSend").addEventListener("click", async () => {
+  const c = $("rawCmd").value.trim();
+  if (!c || busy) return;
+  busy = true;
+  try {
+    log("> " + c);
+    log((await port.cmd(c, 300, 3000)).trimEnd() || t("log.noreply"));
+  } finally { busy = false; }
+});
+$("rawCmd").addEventListener("keydown", (e) => { if (e.key === "Enter") $("rawSend").click(); });
+$("logClear").addEventListener("click", () => ($("log").textContent = ""));
+
+window.addEventListener("resize", drawRssi);
+
+// Reopen a previously-granted port on load, without prompting.
+if (AtPort.supported()) {
+  AtPort.existing().then((p) => p && connectWith(p)).catch(() => {});
+}
+</script>
+</body>
+</html>
