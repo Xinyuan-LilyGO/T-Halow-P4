@@ -25,6 +25,15 @@ int64_t start_time;
 
 esp_lcd_panel_handle_t Screen_Mipi_Dpi_Panel = NULL;
 
+static void Free_Camera_Buffers()
+{
+    for (size_t i = 0; i < CONFIG_EXAMPLE_CAM_BUF_COUNT; ++i)
+    {
+        heap_caps_free(lcd_buffer[i]);
+        lcd_buffer[i] = NULL;
+    }
+}
+
 auto IIC_Bus_1 = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(SGM38121_SDA, SGM38121_SCL, I2C_NUM_1);
 auto SGM38121 = std::make_unique<Cpp_Bus_Driver::Sgm38121>(IIC_Bus_1, SGM38121_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
 
@@ -43,7 +52,7 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
         printf("camera_buf_hes: %lu, camera_buf_ves: %lu, camera_buf_len: %d KB\n", camera_buf_hes, camera_buf_ves, camera_buf_len / 1024);
     }
 
-    uint32_t input_img_block_width = (camera_buf_hes - SCREEN_WIDTH) / 2;
+    uint32_t input_img_block_width = camera_buf_hes > SCREEN_WIDTH ? (camera_buf_hes - SCREEN_WIDTH) / 2 : 0;
     uint32_t input_img_block_height = 0;
     uint32_t input_img_width = SCREEN_WIDTH;
     uint32_t input_img_height = camera_buf_ves;
@@ -148,14 +157,6 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
 
 bool App_Video_Init()
 {
-    esp_lcd_panel_handle_t mipi_dpi_panel = NULL;
-
-    if (Camera_Init(&mipi_dpi_panel) == false)
-    {
-        printf("Camera_Init fail\n");
-        return false;
-    }
-
     ppa_client_config_t ppa_srm_config =
         {
             .oper_type = PPA_OPERATION_SRM,
@@ -209,21 +210,33 @@ bool App_Video_Init()
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-#if CONFIG_EXAMPLE_CAM_BUF_COUNT == 2
-    assert = esp_lcd_dpi_panel_get_frame_buffer(mipi_dpi_panel, 2, &lcd_buffer[0], &lcd_buffer[1]);
-#else
-    assert = esp_lcd_dpi_panel_get_frame_buffer(mipi_dpi_panel, 3, &lcd_buffer[0], &lcd_buffer[1], &lcd_buffer[2]);
-#endif
-    if (assert != ESP_OK)
+    // The camera uses user-provided buffers. Do not create a second DSI/DPI
+    // panel just to obtain buffers: ESP32-P4 has only one DSI bridge IRQ.
+    const size_t camera_buffer_size = app_video_get_buf_size();
+    if (camera_buffer_size == 0)
     {
-        printf("esp_lcd_dpi_panel_get_frame_buffer fail (error code: %#X)\n", assert);
+        printf("invalid camera buffer size\n");
         return false;
+    }
+
+    for (size_t i = 0; i < CONFIG_EXAMPLE_CAM_BUF_COUNT; ++i)
+    {
+        lcd_buffer[i] = heap_caps_aligned_calloc(data_cache_line_size, 1, camera_buffer_size,
+                                                 MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
+        if (lcd_buffer[i] == NULL)
+        {
+            printf("camera buffer allocation failed (index: %u, size: %u)\n",
+                   static_cast<unsigned>(i), static_cast<unsigned>(camera_buffer_size));
+            Free_Camera_Buffers();
+            return false;
+        }
     }
 
     assert = app_video_set_bufs(video_cam_fd0, CONFIG_EXAMPLE_CAM_BUF_COUNT, (const void **)lcd_buffer);
     if (assert != ESP_OK)
     {
         printf("app_video_set_bufs fail (error code: %#X)\n", assert);
+        Free_Camera_Buffers();
         return false;
     }
 
@@ -232,6 +245,7 @@ bool App_Video_Init()
     {
 
         printf("app_video_register_frame_operation_cb fail (error code: %#X)\n", assert);
+        Free_Camera_Buffers();
         return false;
     }
 
@@ -240,6 +254,7 @@ bool App_Video_Init()
     {
 
         printf("app_video_stream_task_start fail (error code: %#X)\n", assert);
+        Free_Camera_Buffers();
         return false;
     }
 
@@ -262,18 +277,32 @@ extern "C" void app_main(void)
 
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    if (App_Video_Init() == false)
+    // Initialize the screen before starting the camera stream. The frame
+    // callback draws to this panel and must never run with a NULL handle.
+    if (!Screen_Init(&Screen_Mipi_Dpi_Panel) || Screen_Mipi_Dpi_Panel == NULL)
     {
-        printf("App_Video_Init fail\n");
+        printf("Screen_Init fail\n");
+        return;
     }
 
-    Screen_Init(&Screen_Mipi_Dpi_Panel);
+    esp_err_t assert = esp_lcd_panel_reset(Screen_Mipi_Dpi_Panel);
+    if (assert != ESP_OK)
+    {
+        printf("esp_lcd_panel_reset fail (error code: %#X)\n", assert);
+        return;
+    }
 
-    esp_lcd_panel_reset(Screen_Mipi_Dpi_Panel);
-    esp_err_t assert = esp_lcd_panel_init(Screen_Mipi_Dpi_Panel);
+    assert = esp_lcd_panel_init(Screen_Mipi_Dpi_Panel);
     if (assert != ESP_OK)
     {
         printf("esp_lcd_panel_init fail (error code: %#X)\n", assert);
+        return;
+    }
+
+    if (App_Video_Init() == false)
+    {
+        printf("App_Video_Init fail\n");
+        return;
     }
     // // Set the entire screen to white.
     // size_t screen_size = SCREEN_WIDTH * SCREEN_HEIGHT * 2; // RGB565: 2 bytes per pixel
@@ -296,7 +325,12 @@ extern "C" void app_main(void)
 
     for (uint8_t i = 0; i < 255; i += 5)
     {
-        set_rm69a10_brightness(Screen_Mipi_Dpi_Panel, i);
+        assert = set_rm69a10_brightness(Screen_Mipi_Dpi_Panel, i);
+        if (assert != ESP_OK)
+        {
+            printf("set_rm69a10_brightness fail (error code: %#X)\n", assert);
+            break;
+        }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 

@@ -1,4 +1,5 @@
 #include "esp_lcd_panel_ops.h"
+#include "esp_lcd_panel_io.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "cpp_bus_driver_library.h"
 #include "t_halow_p4_driver.h"
@@ -8,6 +9,12 @@ bool Mipi_Dsi_Init(uint8_t num_data_lanes, uint32_t lane_bit_rate_mbps, uint32_t
                    uint32_t mipi_dsi_hsync, uint32_t mipi_dsi_hbp, uint32_t mipi_dsi_hfp, uint32_t mipi_dsi_vsync, uint32_t mipi_dsi_vbp, uint32_t mipi_dsi_vfp,
                    uint32_t bits_per_pixel, esp_lcd_panel_handle_t *mipi_dpi_panel)
 {
+    if (mipi_dpi_panel == nullptr)
+    {
+        return false;
+    }
+    *mipi_dpi_panel = nullptr;
+
     esp_lcd_dsi_bus_handle_t mipi_dsi_bus;
     esp_lcd_panel_io_handle_t mipi_dbi_io;
 
@@ -38,6 +45,7 @@ bool Mipi_Dsi_Init(uint8_t num_data_lanes, uint32_t lane_bit_rate_mbps, uint32_t
     if (assert != ESP_OK)
     {
         cpp_assert->assert_log(Cpp_Bus_Driver::Tool::Log_Level::INFO, __FILE__, __LINE__, "esp_lcd_new_panel_io_dbi fail (error code: %#X)\n", assert);
+        esp_lcd_del_dsi_bus(mipi_dsi_bus);
         return false;
     }
 
@@ -77,6 +85,8 @@ bool Mipi_Dsi_Init(uint8_t num_data_lanes, uint32_t lane_bit_rate_mbps, uint32_t
     if (assert != ESP_OK)
     {
         cpp_assert->assert_log(Cpp_Bus_Driver::Tool::Log_Level::INFO, __FILE__, __LINE__, "esp_lcd_new_panel_rm69a10 fail (error code: %#X)\n", assert);
+        esp_lcd_panel_io_del(mipi_dbi_io);
+        esp_lcd_del_dsi_bus(mipi_dsi_bus);
         return false;
     }
     return true;
