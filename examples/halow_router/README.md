@@ -72,8 +72,26 @@ bootloader, then tap **RST** again after flashing to run the new image.
 
 ## Measured
 
-<!-- TODO: fill in from bench: NAPT-path throughput vs halow_netif direct,
-     RSSI, distance/conditions -->
+Bench: this board as the HaLow **station** running `halow_router`; a second
+T-Halow board as the HaLow **AP**; both on the desk (strong signal), 866.0 MHz /
+2 MHz bandwidth, open. A laptop joined the C6 SoftAP and a host on the AP's far
+side terminated the traffic. Short range only — range and RSSI-vs-rate were not
+characterised. Downlink measured with TCP (bulk); uplink capacity with UDP at a
+fixed offered rate (avoids TCP congestion collapse masking the link limit).
+
+| Path | Direction | Offered | Result |
+|---|---|---|---|
+| ICMP through NAT | round-trip | — | 0% loss, ~24 ms RTT, TTL decremented (ttl=63) |
+| TCP bulk | downlink (HaLow→client) | — | **2.22 Mbit/s** sustained, clean |
+| UDP | uplink (client→HaLow) | 0.5 Mbit/s | 0% loss |
+| UDP | uplink | 1.0 Mbit/s | 0% loss |
+| UDP | uplink | 2.0 Mbit/s | ~99% loss (link saturated) |
+| UDP | uplink | 4.0 Mbit/s | 100% loss; C6 SoftAP dropped — see Limitations |
+
+The link is **asymmetric**: downlink (P4 receiving on HaLow) sustains ~2.2 Mbit/s,
+while uplink (P4 transmitting over the SPI→HaLow path) is clean to ~1 Mbit/s and
+saturates by 2. For an uplink-heavy workload (e.g. a camera streaming home), pace
+the source to ≤1 Mbit/s.
 
 ## Limitations
 
@@ -83,9 +101,14 @@ bootloader, then tap **RST** again after flashing to run the new image.
   the board's USB console, moved onto its private SoftAP. Set a WiFi password.
 - If the HaLow AP's far side uses 192.168.4.0/24, NAT will not work; change one
   of the subnets.
-- Throughput is bounded by the HaLow link (~1.3 Mbit/s each way at 2 MHz
-  bandwidth) — ample for sensors, cameras at modest rates, SSH; not for video
-  streaming.
+- Throughput is **asymmetric** and bounded by the HaLow link: ~2.2 Mbit/s
+  downlink, ~1 Mbit/s clean uplink at 2 MHz bandwidth (see Measured). Ample for
+  sensors, telemetry, SSH and modest-rate cameras; not for high-bitrate video.
+- **Uplink overload:** offering well past the uplink's capacity (≳2 Mbit/s) can
+  exhaust `esp_hosted`'s SDIO receive buffers — with the stock component this
+  resets the board, and in any case the C6 SoftAP may drop and need a
+  power-cycle to recover. The P4 does not (yet) apply backpressure toward the
+  C6, so pace uplink sources to the link capacity.
 - The WPA-PSK path follows the vendor reference but has not been verified on
   hardware.
 
