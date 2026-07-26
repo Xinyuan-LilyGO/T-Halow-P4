@@ -23,12 +23,22 @@ typedef struct {
  * Guards all access to the vendor driver's SPI bus and hgic global state --
  * shared between TX (hgic_transmit, below) and the RX pump (via the exported
  * hgic_netif_spi_lock/unlock). One module-wide instance: there is a single
- * radio. Created in hgic_netif_create() before any TX or pump can run.
+ * radio. Statically allocated -- callers lock during radio bring-up, which
+ * happens before hgic_netif_create().
  */
+static StaticSemaphore_t s_spi_lock_buf;
 static SemaphoreHandle_t s_spi_lock;
 
-void hgic_netif_spi_lock(void)   { xSemaphoreTake(s_spi_lock, portMAX_DELAY); }
-void hgic_netif_spi_unlock(void) { xSemaphoreGive(s_spi_lock); }
+static SemaphoreHandle_t spi_lock(void)
+{
+    if (s_spi_lock == NULL) {
+        s_spi_lock = xSemaphoreCreateMutexStatic(&s_spi_lock_buf);
+    }
+    return s_spi_lock;
+}
+
+void hgic_netif_spi_lock(void)   { xSemaphoreTake(spi_lock(), portMAX_DELAY); }
+void hgic_netif_spi_unlock(void) { xSemaphoreGive(spi_lock()); }
 
 /*
  * hgic_raw_send_ether() serialises into the single shared hgic.tx_buf, so it
@@ -94,9 +104,6 @@ esp_netif_t *hgic_netif_create(const uint8_t mac[6])
         return NULL;
     }
     drv->base.post_attach = hgic_post_attach;
-    if (s_spi_lock == NULL) {
-        s_spi_lock = xSemaphoreCreateMutex();
-    }
 
     if (esp_netif_attach(netif, drv) != ESP_OK) {
         ESP_LOGE(TAG, "esp_netif_attach failed");
