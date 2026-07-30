@@ -39,6 +39,18 @@ extern "C"
 #include "hgic_raw.h"
 }
 
+/*
+ * Connect HaLow egress backpressure to esp_hosted's uplink flow control: when
+ * the radio TX queue in hgic_netif backs up, pause the C6's Wi-Fi RX so 802.11
+ * flow control reaches the WiFi client. Overrides the weak no-op in hgic_netif;
+ * esp_hosted_wifi_rx_throttle() lives in the (modified) esp_hosted host driver.
+ */
+extern "C" void esp_hosted_wifi_rx_throttle(bool pause);
+extern "C" void hgic_netif_egress_throttle(bool pause)
+{
+    esp_hosted_wifi_rx_throttle(pause);
+}
+
 #define MAX_SPI_RECEIVE_SIZE std::min(HGIC_RAW_DATA_ROOM, HGIC_RAW_MAX_PAYLOAD)
 #define HGIC_RX_BUF_SIZE 2048
 

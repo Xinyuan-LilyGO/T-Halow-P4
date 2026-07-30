@@ -5,3 +5,6 @@ dependencies:
 
   espressif/esp_hosted:
     version: "1.4.*"
+    # Local fork adding uplink (slave->host) flow control. Matches 1.4.7.
+    # Dir basename must equal the component name for CMake to resolve it.
+    override_path: "/home/ian/Code/espressif__esp_hosted"
