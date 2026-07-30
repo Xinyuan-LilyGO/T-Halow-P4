@@ -58,7 +58,10 @@ to its default role on reset and the firmware re-asserts station mode at boot.
 
 ## Build and flash
 
-Requires ESP-IDF v5.4.1 or later.
+Requires ESP-IDF v5.4.1 or later. The example uses a fork of
+`espressif/esp_hosted` 1.4.7 (uplink flow control + host stall watchdog,
+proposed upstream), vendored as a submodule — clone with `--recursive`, or run
+`git submodule update --init --recursive` in an existing checkout.
 
 ```
 idf.py set-target esp32p4
@@ -86,12 +89,32 @@ fixed offered rate (avoids TCP congestion collapse masking the link limit).
 | UDP | uplink (client→HaLow) | 0.5 Mbit/s | 0% loss |
 | UDP | uplink | 1.0 Mbit/s | 0% loss |
 | UDP | uplink | 2.0 Mbit/s | ~99% loss (link saturated) |
-| UDP | uplink | 4.0 Mbit/s | 100% loss; C6 SoftAP dropped — see Limitations |
+| UDP | uplink | 4.0 Mbit/s | 100% loss; C6 SoftAP dropped — since fixed, see below |
 
 The link is **asymmetric**: downlink (P4 receiving on HaLow) sustains ~2.2 Mbit/s,
 while uplink (P4 transmitting over the SPI→HaLow path) is clean to ~1 Mbit/s and
 saturates by 2. For an uplink-heavy workload (e.g. a camera streaming home), pace
 the source to ≤1 Mbit/s.
+
+### Uplink overload robustness
+
+A later bench (same boards, wider HaLow bandwidth, so absolute rates differ from
+the 2 MHz table above) measured what happens when a client offers far more
+uplink than the link can carry, using the vendored esp_hosted fork on both MCUs:
+
+| Uplink offered | Result |
+|---|---|
+| 1 Mbit/s | 1.00 Mbit/s delivered, 1042/1042 packets, 0 drops |
+| 4 Mbit/s | 3.04 Mbit/s delivered (rate-matched to the link) |
+| 8 Mbit/s sustained flood | client throttled to ~0.7 Mbit/s by 802.11 backpressure; SoftAP stays up; little delivered *during* the flood (drops by design) |
+
+With stock esp_hosted 1.4.7 the same flood killed the SoftAP until a power
+cycle (the slave's Wi-Fi task blocks forever on a full to-host queue) and could
+silently wedge the P4's SDIO read path (internal-DMA heap exhaustion). The fork
+bounds both waits (drop instead of block) and adds a host-side stall watchdog:
+if the wedge still occurs, the P4 detects it within 10 s, logs the state and
+restarts itself (resetting the C6 too), restoring normal service in ~15 s with
+no operator. Verified over three flood runs.
 
 ## Limitations
 
@@ -104,11 +127,15 @@ the source to ≤1 Mbit/s.
 - Throughput is **asymmetric** and bounded by the HaLow link: ~2.2 Mbit/s
   downlink, ~1 Mbit/s clean uplink at 2 MHz bandwidth (see Measured). Ample for
   sensors, telemetry, SSH and modest-rate cameras; not for high-bitrate video.
-- **Uplink overload:** offering well past the uplink's capacity (≳2 Mbit/s) can
-  exhaust `esp_hosted`'s SDIO receive buffers — with the stock component this
-  resets the board, and in any case the C6 SoftAP may drop and need a
-  power-cycle to recover. The P4 does not (yet) apply backpressure toward the
-  C6, so pace uplink sources to the link capacity.
+- **Uplink overload:** a client offering well past link capacity is throttled
+  and dropped rather than breaking the router (see *Uplink overload
+  robustness*), but sustained overload delivers little — pace uplink sources to
+  the link capacity for useful throughput. Full robustness needs the vendored
+  fork's **slave** firmware on the C6 as well (`third_party/espressif__esp_hosted/slave`,
+  target esp32c6, flashed over the C6's UART with the P4 held in its bootloader
+  so it cannot reset the C6 mid-flash); with a stock C6 slave, the SoftAP can
+  still wedge, though the P4's watchdog will keep resetting the pair back to a
+  working state.
 - The WPA-PSK path follows the vendor reference but has not been verified on
   hardware.
 

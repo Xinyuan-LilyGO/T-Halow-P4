@@ -5,6 +5,11 @@ dependencies:
 
   espressif/esp_hosted:
     version: "1.4.*"
-    # Local fork adding uplink (slave->host) flow control. Matches 1.4.7.
-    # Dir basename must equal the component name for CMake to resolve it.
-    override_path: "/home/ian/Code/espressif__esp_hosted"
+    # Fork of esp_hosted 1.4.7 (vendored as a submodule, third_party/) adding
+    # uplink (slave->host) flow control and a host-side SDIO stall watchdog;
+    # proposed upstream. Drop the override and use the registry once merged
+    # there. NB a git source here doesn't work: esp_wifi_remote's transitive
+    # constraint then resolves esp_hosted from the registry independently and
+    # that copy wins the link. The dir basename must equal the component name
+    # for CMake to resolve it.
+    override_path: "../../../third_party/espressif__esp_hosted"

@@ -1,0 +1,3 @@
+[submodule "third_party/espressif__esp_hosted"]
+	path = third_party/espressif__esp_hosted
+	url = https://github.com/GlassOnTin/esp-hosted-mcu.git
