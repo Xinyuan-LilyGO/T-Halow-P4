@@ -7,6 +7,8 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 
@@ -41,11 +43,76 @@ void hgic_netif_spi_lock(void)   { xSemaphoreTake(spi_lock(), portMAX_DELAY); }
 void hgic_netif_spi_unlock(void) { xSemaphoreGive(spi_lock()); }
 
 /*
- * hgic_raw_send_ether() serialises into the single shared hgic.tx_buf, so it
- * must not be re-entered. It returns the number of bytes handed to the SPI
- * layer -- a positive value -- on success, and -1 on failure. (The vendor's
- * lwIP demo treats any non-zero return as an error, which is backwards.)
+ * HaLow egress (TX) queue.
+ *
+ * lwIP calls hgic_transmit() from the tcpip thread. Sending synchronously over
+ * SPI there blocks that thread, and when the radio is slower than the ingress
+ * (a WiFi->HaLow router under uplink load), frames pile up with nothing to
+ * signal upstream -- the SDIO/host side never sees the pressure because it
+ * drains fine; the bottleneck is here, at the radio. So we copy each frame
+ * into a bounded queue drained by a dedicated TX task, and use the queue depth
+ * as the egress-backlog signal: crossing the high-water mark asks the app to
+ * throttle its ingress, dropping below the low mark releases it. Queue-full is
+ * a plain drop (TCP retransmits; UDP is expendable).
  */
+#define HGIC_TX_Q_DEPTH   32
+#define HGIC_TX_Q_HIGH    24   /* ask ingress to pause at 75% full */
+#define HGIC_TX_Q_LOW      8   /* release ingress at 25% full     */
+
+typedef struct {
+    uint16_t len;
+    uint8_t *data;   /* malloc'd copy, freed by the TX task */
+} hgic_tx_msg_t;
+
+static QueueHandle_t s_tx_queue;
+static volatile bool s_egress_throttled;
+
+/*
+ * Weak hook: an application that forwards onto the radio overrides this to
+ * connect HaLow egress backlog to its own ingress flow control (the router
+ * wires it to esp_hosted slave-RX pause). Default no-op.
+ */
+__attribute__((weak)) void hgic_netif_egress_throttle(bool pause) { (void)pause; }
+
+/*
+ * hgic_raw_send_ether() serialises into the single shared hgic.tx_buf, so it
+ * must not be re-entered; the single TX task is the only sender. It returns
+ * the bytes handed to SPI (positive) on success, -1 on failure.
+ */
+static void hgic_tx_task(void *arg)
+{
+    (void)arg;
+    hgic_tx_msg_t msg;
+    for (;;) {
+        if (xQueueReceive(s_tx_queue, &msg, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        hgic_netif_spi_lock();
+        hgic_raw_send_ether(msg.data, msg.len);
+        hgic_netif_spi_unlock();
+        free(msg.data);
+
+        if (s_egress_throttled &&
+            uxQueueMessagesWaiting(s_tx_queue) <= HGIC_TX_Q_LOW) {
+            s_egress_throttled = false;
+            hgic_netif_egress_throttle(false);
+        }
+    }
+}
+
+static void hgic_tx_start(void)
+{
+    if (s_tx_queue) {
+        return;
+    }
+    s_tx_queue = xQueueCreate(HGIC_TX_Q_DEPTH, sizeof(hgic_tx_msg_t));
+    if (s_tx_queue == NULL) {
+        ESP_LOGE(TAG, "tx queue alloc failed");
+        return;
+    }
+    xTaskCreate(hgic_tx_task, "hgic_tx", 4096, NULL, 10, NULL);
+}
+
 static esp_err_t hgic_transmit(void *h, void *buffer, size_t len)
 {
     (void)h;
@@ -53,12 +120,29 @@ static esp_err_t hgic_transmit(void *h, void *buffer, size_t len)
     if (len > HGIC_RAW_MAX_PAYLOAD) {
         return ESP_ERR_INVALID_SIZE;
     }
+    if (s_tx_queue == NULL) {
+        return ESP_FAIL;
+    }
 
-    hgic_netif_spi_lock();
-    int written = hgic_raw_send_ether((unsigned char *)buffer, (unsigned int)len);
-    hgic_netif_spi_unlock();
+    uint8_t *copy = malloc(len);
+    if (copy == NULL) {
+        return ESP_OK;   /* out of memory -- drop this frame */
+    }
+    memcpy(copy, buffer, len);
 
-    return written > 0 ? ESP_OK : ESP_FAIL;
+    hgic_tx_msg_t msg = { .len = (uint16_t)len, .data = copy };
+    if (xQueueSend(s_tx_queue, &msg, 0) != pdTRUE) {
+        free(copy);      /* egress backlog full -- drop */
+        return ESP_OK;
+    }
+
+    /* Egress backing up? ask the application to pause its ingress. */
+    if (!s_egress_throttled &&
+        uxQueueMessagesWaiting(s_tx_queue) >= HGIC_TX_Q_HIGH) {
+        s_egress_throttled = true;
+        hgic_netif_egress_throttle(true);
+    }
+    return ESP_OK;
 }
 
 static void hgic_free_rx(void *h, void *buffer)
@@ -113,6 +197,9 @@ esp_netif_t *hgic_netif_create(const uint8_t mac[6])
     }
 
     ESP_ERROR_CHECK(esp_netif_set_mac(netif, (uint8_t *)mac));
+
+    /* Start the egress TX task before the interface can transmit. */
+    hgic_tx_start();
 
     /* Bring the interface up. The link stays down until hgic_netif_set_link(). */
     esp_netif_action_start(netif, NULL, 0, NULL);
