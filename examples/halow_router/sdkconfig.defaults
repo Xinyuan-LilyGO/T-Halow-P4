@@ -25,3 +25,6 @@ CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 # NAT between the WiFi SoftAP and the HaLow link.
 CONFIG_LWIP_IP_FORWARD=y
 CONFIG_LWIP_IPV4_NAPT=y
+
+# OTA: roll back automatically if a new image never marks itself valid
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

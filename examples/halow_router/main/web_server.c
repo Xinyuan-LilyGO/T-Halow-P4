@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "nvs.h"
 
@@ -160,6 +161,90 @@ static esp_err_t reboot_post_handler(httpd_req_t *req)
     return ESP_OK;                  /* not reached */
 }
 
+/*
+ * Firmware update: POST the raw app image (build/halow_router.bin) to
+ * /api/ota, e.g. curl --data-binary @halow_router.bin http://192.168.4.1/api/ota
+ * Written to the inactive OTA slot, validated by esp_ota_end(), then booted.
+ * With bootloader rollback enabled, an image that crashes before app_main
+ * marks itself valid reverts to this one on the next reset.
+ */
+#define OTA_BUF_SIZE 4096
+
+static esp_err_t ota_post_handler(httpd_req_t *req)
+{
+    const esp_partition_t *dst = esp_ota_get_next_update_partition(NULL);
+    if (dst == NULL)
+    {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no OTA partition");
+    }
+    if (req->content_len == 0)
+    {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty body");
+    }
+    if (req->content_len > dst->size)
+    {
+        return httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE, "image larger than OTA slot");
+    }
+
+    char *buf = malloc(OTA_BUF_SIZE);
+    if (buf == NULL)
+    {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+    }
+
+    esp_ota_handle_t ota;
+    esp_err_t err = esp_ota_begin(dst, OTA_WITH_SEQUENTIAL_WRITES, &ota);
+    if (err != ESP_OK)
+    {
+        free(buf);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+    }
+    ESP_LOGI(TAG, "ota: %u bytes -> %s", (unsigned)req->content_len, dst->label);
+
+    size_t remaining = req->content_len;
+    while (remaining > 0 && err == ESP_OK)
+    {
+        int n = httpd_req_recv(req, buf, remaining < OTA_BUF_SIZE ? remaining : OTA_BUF_SIZE);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT)
+        {
+            continue;
+        }
+        if (n <= 0)
+        {
+            err = ESP_FAIL;
+            break;
+        }
+        err = esp_ota_write(ota, buf, n);
+        remaining -= n;
+    }
+    free(buf);
+
+    if (err == ESP_OK)
+    {
+        err = esp_ota_end(ota); /* verifies the complete image */
+    }
+    else
+    {
+        esp_ota_abort(ota);
+    }
+    if (err == ESP_OK)
+    {
+        err = esp_ota_set_boot_partition(dst);
+    }
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "ota failed: %s", esp_err_to_name(err));
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+    }
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_send(req, "OK, flashed; rebooting into new image", HTTPD_RESP_USE_STRLEN);
+    ESP_LOGW(TAG, "ota complete, rebooting into %s", dst->label);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+    return ESP_OK; /* not reached */
+}
+
 static esp_err_t resync_post_handler(httpd_req_t *req)
 {
     bool ok = at_uart_resync();
@@ -185,12 +270,14 @@ esp_err_t web_server_start(void)
     const httpd_uri_t api_at = {.uri = "/api/at", .method = HTTP_POST, .handler = at_post_handler};
     const httpd_uri_t api_resync = {.uri = "/api/resync", .method = HTTP_POST, .handler = resync_post_handler};
     const httpd_uri_t api_reboot = {.uri = "/api/reboot", .method = HTTP_POST, .handler = reboot_post_handler};
+    const httpd_uri_t api_ota = {.uri = "/api/ota", .method = HTTP_POST, .handler = ota_post_handler};
 
     httpd_register_uri_handler(server, &root);
     httpd_register_uri_handler(server, &index_html);
     httpd_register_uri_handler(server, &api_at);
     httpd_register_uri_handler(server, &api_resync);
     httpd_register_uri_handler(server, &api_reboot);
+    httpd_register_uri_handler(server, &api_ota);
 
     ESP_LOGI(TAG, "config page up on http://192.168.4.1/");
     return ESP_OK;

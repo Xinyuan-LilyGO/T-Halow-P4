@@ -23,6 +23,7 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi_remote.h"
+#include "esp_ota_ops.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 
@@ -452,6 +453,11 @@ extern "C" void app_main(void)
         // The web server and AT bridge run on their own tasks; nothing to pump.
         printf("halow uplink NOT active (module MAC never read); web config only\n");
     }
+
+    // The web portal is up, so a remote OTA/reboot can always recover the
+    // board from here: accept this image. An OTA image that dies before this
+    // line is rolled back by the bootloader on the next reset.
+    esp_ota_mark_app_valid_cancel_rollback();
 
     // Do not return from app_main: on this target, self-deleting the main task
     // faults the idle task as it reclaims the stack. Keep it parked instead.
