@@ -38,6 +38,13 @@ extern "C" {
  */
 esp_netif_t *hgic_netif_create(const uint8_t mac[6]);
 
+/*
+ * AP-side variant: static address plus a DHCP server for the HaLow BSS.
+ * The interface's own address doubles as the gateway it hands to clients.
+ */
+esp_netif_t *hgic_netif_create_dhcps(const uint8_t mac[6], const char *ip,
+                                     const char *netmask);
+
 /* Stop the DHCP client and assign a fixed address. */
 esp_err_t hgic_netif_set_static_ip(esp_netif_t *netif, const char *ip,
                                    const char *netmask, const char *gw);
