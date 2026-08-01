@@ -67,6 +67,43 @@ static esp_netif_t *s_ap_netif = nullptr;
 // isn't routed".
 static volatile uint32_t s_rx_frames = 0;
 static volatile uint32_t s_rx_data_frames = 0;
+static volatile uint32_t s_rx_chatter_dropped = 0;
+
+/*
+ * The AP-side bridge forwards the whole LAN segment's broadcast/multicast
+ * chatter (SSDP, mDNS, NetBIOS, IPv6 ND, ...) over HaLow. The airtime is
+ * already spent by the time it reaches us, but without this filter every such
+ * frame also costs a malloc, a copy and a trip through the tcpip thread just
+ * to be discarded by lwIP -- NAT clients can never receive it anyway. Keep
+ * only the group-addressed traffic the router itself needs: ARP, and IPv4
+ * broadcast DHCP (an OFFER/ACK is broadcast when the client requests it).
+ */
+static bool lan_chatter(const uint8_t *frame, size_t len)
+{
+    if (len < 14 || (frame[0] & 1) == 0)
+    {
+        return false; /* unicast (or runt): keep */
+    }
+
+    uint16_t ethertype = (frame[12] << 8) | frame[13];
+    if (ethertype == 0x0806)
+    {
+        return false; /* ARP: keep */
+    }
+    if (ethertype == 0x0800 && len >= 14 + 20 + 8)
+    {
+        size_t ihl = (frame[14] & 0x0f) * 4;
+        if (frame[23] == 17 && len >= 14 + ihl + 8)
+        {
+            uint16_t dport = (frame[14 + ihl + 2] << 8) | frame[14 + ihl + 3];
+            if (dport == 67 || dport == 68)
+            {
+                return false; /* DHCP: keep */
+            }
+        }
+    }
+    return true; /* everything else group-addressed: drop */
+}
 
 auto Tx_Ah_R900pnr_Spi_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Spi>(
     TX_AH_R900PNR_MOSI, TX_AH_R900PNR_SCLK, TX_AH_R900PNR_MISO,
@@ -144,6 +181,11 @@ static void hgic_pump_rx(void)
 
         if (type == HGIC_RAW_RX_TYPE_DATA && s_halow_netif != nullptr)
         {
+            if (lan_chatter(p, len))
+            {
+                s_rx_chatter_dropped++;
+                continue;
+            }
             s_rx_data_frames++;
             hgic_netif_input(s_halow_netif, p, len);
         }
@@ -333,8 +375,9 @@ static void halow_pump_task(void *arg)
         if (now >= next_stats)
         {
             next_stats = now + 3000;
-            printf("halow rx: frames=%lu data=%lu\n",
-                   (unsigned long)s_rx_frames, (unsigned long)s_rx_data_frames);
+            printf("halow rx: frames=%lu data=%lu chatter-dropped=%lu\n",
+                   (unsigned long)s_rx_frames, (unsigned long)s_rx_data_frames,
+                   (unsigned long)s_rx_chatter_dropped);
         }
 
         vTaskDelay(pdMS_TO_TICKS(1));
