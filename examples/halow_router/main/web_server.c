@@ -8,8 +8,10 @@
 
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "nvs.h"
 
 #include "at_uart.h"
+#include "web_server.h"
 
 static const char *TAG = "web_server";
 
@@ -53,6 +55,48 @@ static int query_int(httpd_req_t *req, const char *key, int fallback, int lo, in
     return out;
 }
 
+/*
+ * The radio persists ssid/channel/bandwidth/key itself but reverts its role on
+ * every power-up, so the firmware must re-assert one at boot. When the config
+ * page sets the role (AT+MODE=ap / AT+MODE=sta), remember it in NVS; app_main
+ * asserts the remembered role instead of a hard-coded "sta".
+ */
+#define ROLE_NVS_NS "router"
+#define ROLE_NVS_KEY "halow_role"
+
+void web_server_get_halow_role(char *role, size_t cap)
+{
+    nvs_handle_t h;
+    if (nvs_open(ROLE_NVS_NS, NVS_READONLY, &h) == ESP_OK)
+    {
+        size_t len = cap;
+        nvs_get_str(h, ROLE_NVS_KEY, role, &len); /* leaves the default on miss */
+        nvs_close(h);
+    }
+}
+
+static void remember_halow_role(const char *line)
+{
+    if (strncasecmp(line, "AT+MODE=", 8) != 0)
+    {
+        return;
+    }
+    const char *mode = line + 8;
+    if (strcasecmp(mode, "ap") != 0 && strcasecmp(mode, "sta") != 0)
+    {
+        return;
+    }
+
+    nvs_handle_t h;
+    if (nvs_open(ROLE_NVS_NS, NVS_READWRITE, &h) == ESP_OK)
+    {
+        nvs_set_str(h, ROLE_NVS_KEY, mode);
+        nvs_commit(h);
+        nvs_close(h);
+        ESP_LOGI(TAG, "halow role \"%s\" saved, re-asserted on every boot", mode);
+    }
+}
+
 static esp_err_t at_post_handler(httpd_req_t *req)
 {
     char line[AT_LINE_MAX + 1];
@@ -88,6 +132,8 @@ static esp_err_t at_post_handler(httpd_req_t *req)
         free(reply);
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "AT port busy");
     }
+
+    remember_halow_role(line);
 
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     esp_err_t err = httpd_resp_send(req, reply, len);

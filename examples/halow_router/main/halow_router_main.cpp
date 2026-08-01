@@ -342,6 +342,16 @@ static void halow_pump_task(void *arg)
 
 extern "C" void app_main(void)
 {
+    // NVS backs the web-configured HaLow role (and esp_wifi_init() needs it
+    // too), so bring it up before the radio.
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
+
     Tx_Ah_R900pnr_Spi_Bus->create_gpio_interrupt(
         TX_AH_R900PNR_INT, Cpp_Bus_Driver::Tool::Interrupt_Mode::FALLING,
         [](void *arg) -> IRAM_ATTR void
@@ -369,24 +379,20 @@ extern "C" void app_main(void)
     bool halow_ok = hgic_wait_for_mac(5000);
     if (halow_ok)
     {
-        // The router's HaLow side is a station by definition. The module
-        // persists ssid/channel/bandwidth/key itself, but reverts the role on
-        // power-up, so re-assert it every boot.
-        hgic_raw_set_mode((char *)"sta");
+        // The module persists ssid/channel/bandwidth/key itself, but reverts
+        // the role on power-up, so re-assert one every boot: "sta" (the normal
+        // router topology -- join a HaLow AP that bridges to the internet
+        // gateway) unless the config page has set AT+MODE=ap, which the web
+        // server remembers in NVS.
+        char role[8] = "sta";
+        web_server_get_halow_role(role, sizeof(role));
+        printf("halow role: %s\n", role);
+        hgic_raw_set_mode(role);
     }
     else
     {
         printf("hgic_raw_get_fwinfo: no response, HaLow uplink disabled\n");
     }
-
-    // NVS must be initialised before esp_wifi_init().
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
-    {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(err);
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
