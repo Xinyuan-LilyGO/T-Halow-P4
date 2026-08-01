@@ -6,8 +6,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "nvs.h"
 
 #include "at_uart.h"
@@ -141,6 +144,22 @@ static esp_err_t at_post_handler(httpd_req_t *req)
     return err;
 }
 
+/*
+ * Reboot the ESP32-P4 (not the radio). The board runs on battery, so pulling
+ * USB power does not reset it and RST is a physical button -- this is the only
+ * remote way back to a fresh boot (e.g. to apply a saved role without hands on
+ * the board).
+ */
+static esp_err_t reboot_post_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_send(req, "OK, rebooting", HTTPD_RESP_USE_STRLEN);
+    ESP_LOGW(TAG, "reboot requested via /api/reboot");
+    vTaskDelay(pdMS_TO_TICKS(500)); /* let the response reach the client */
+    esp_restart();
+    return ESP_OK;                  /* not reached */
+}
+
 static esp_err_t resync_post_handler(httpd_req_t *req)
 {
     bool ok = at_uart_resync();
@@ -165,11 +184,13 @@ esp_err_t web_server_start(void)
     const httpd_uri_t index_html = {.uri = "/index.html", .method = HTTP_GET, .handler = page_get_handler};
     const httpd_uri_t api_at = {.uri = "/api/at", .method = HTTP_POST, .handler = at_post_handler};
     const httpd_uri_t api_resync = {.uri = "/api/resync", .method = HTTP_POST, .handler = resync_post_handler};
+    const httpd_uri_t api_reboot = {.uri = "/api/reboot", .method = HTTP_POST, .handler = reboot_post_handler};
 
     httpd_register_uri_handler(server, &root);
     httpd_register_uri_handler(server, &index_html);
     httpd_register_uri_handler(server, &api_at);
     httpd_register_uri_handler(server, &api_resync);
+    httpd_register_uri_handler(server, &api_reboot);
 
     ESP_LOGI(TAG, "config page up on http://192.168.4.1/");
     return ESP_OK;
