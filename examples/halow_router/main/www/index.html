@@ -909,5 +909,50 @@ if (AtPort.supported()) {
   AtPort.existing().then((p) => p && connectWith(p)).catch(() => {});
 }
 </script>
+<!-- Node settings: only shown when the firmware exposes /api/wifi (the
+     combined halow_node image). WiFi credentials are stored in NVS and applied
+     at the next boot; the HaLow Role above doubles as the node personality
+     (sta = router: SoftAP + NAT to HaLow; ap = gateway: home-WiFi STA + DHCP
+     server on HaLow). -->
+<div id="nodeCard" class="card" style="display:none">
+  <h2>Node WiFi</h2>
+  <p class="note">Role <b id="nodeRole">?</b> selects the personality: <b>sta</b> = router
+  (serves the SoftAP below), <b>ap</b> = gateway (joins the home WiFi below). Saved
+  values apply on the next boot.</p>
+  <div class="grid">
+    <label>SoftAP SSID <input id="nodeApSsid" maxlength="32"></label>
+    <label>SoftAP password <input id="nodeApPass" maxlength="64" placeholder="(unchanged)"></label>
+    <label>Home WiFi SSID (2.4 GHz) <input id="nodeStaSsid" maxlength="32"></label>
+    <label>Home WiFi password <input id="nodeStaPass" maxlength="64" placeholder="(unchanged)"></label>
+  </div>
+  <p><button id="nodeSave">Save</button>
+     <button id="nodeApply">Save &amp; reboot</button>
+     <span id="nodeMsg" class="note"></span></p>
+</div>
+<script>
+(function () {
+  fetch('/api/wifi').then(r => { if (!r.ok) throw 0; return r.json(); }).then(c => {
+    document.getElementById('nodeCard').style.display = '';
+    document.getElementById('nodeRole').textContent = c.role || '?';
+    document.getElementById('nodeApSsid').value = c.ap_ssid || '';
+    document.getElementById('nodeStaSsid').value = c.sta_ssid || '';
+  }).catch(() => {});
+  function save() {
+    const f = ['ApSsid=ap_ssid', 'ApPass=ap_pass', 'StaSsid=sta_ssid', 'StaPass=sta_pass'];
+    const body = f.map(m => {
+      const [id, key] = m.split('=');
+      const v = document.getElementById('node' + id).value;
+      return v ? key + '=' + encodeURIComponent(v) : null;
+    }).filter(Boolean).join('&');
+    return fetch('/api/wifi', { method: 'POST', body: body,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }).then(r => r.text());
+  }
+  document.getElementById('nodeSave').onclick = () =>
+    save().then(t => document.getElementById('nodeMsg').textContent = t);
+  document.getElementById('nodeApply').onclick = () =>
+    save().then(() => fetch('/api/reboot', { method: 'POST' }))
+          .then(() => document.getElementById('nodeMsg').textContent = 'rebooting…');
+})();
+</script>
 </body>
 </html>

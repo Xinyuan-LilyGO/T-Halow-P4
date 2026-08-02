@@ -79,6 +79,102 @@ void web_server_get_halow_role(char *role, size_t cap)
     }
 }
 
+/* Generic NVS string fetch from the same namespace; `dst` keeps its (default)
+ * content when the key has never been saved. Used for the WiFi credentials. */
+void web_server_get_nvs_str(const char *key, char *dst, size_t cap)
+{
+    nvs_handle_t h;
+    if (nvs_open(ROLE_NVS_NS, NVS_READONLY, &h) == ESP_OK)
+    {
+        size_t len = cap;
+        nvs_get_str(h, key, dst, &len);
+        nvs_close(h);
+    }
+}
+
+/* ------------------------------------------------------------------------ */
+/* Runtime WiFi credentials: GET /api/wifi (SSIDs + role, never passwords),  */
+/* POST /api/wifi (urlencoded; only supplied keys are written; applied at    */
+/* the next boot -- POST /api/reboot to apply immediately).                  */
+/* ------------------------------------------------------------------------ */
+
+static void url_decode(char *s)
+{
+    char *o = s;
+    for (; *s; s++, o++)
+    {
+        if (*s == '+')
+        {
+            *o = ' ';
+        }
+        else if (*s == '%' && s[1] && s[2])
+        {
+            char hex[3] = {s[1], s[2], 0};
+            *o = (char)strtol(hex, NULL, 16);
+            s += 2;
+        }
+        else
+        {
+            *o = *s;
+        }
+    }
+    *o = 0;
+}
+
+static const char *WIFI_KEYS[] = {"ap_ssid", "ap_pass", "sta_ssid", "sta_pass"};
+
+static esp_err_t wifi_get_handler(httpd_req_t *req)
+{
+    char ap_ssid[33] = "";
+    char sta_ssid[33] = "";
+    char role[8] = "";
+    web_server_get_nvs_str("ap_ssid", ap_ssid, sizeof(ap_ssid));
+    web_server_get_nvs_str("sta_ssid", sta_ssid, sizeof(sta_ssid));
+    web_server_get_halow_role(role, sizeof(role));
+
+    char buf[160];
+    snprintf(buf, sizeof(buf), "{\"role\":\"%s\",\"ap_ssid\":\"%s\",\"sta_ssid\":\"%s\"}",
+             role, ap_ssid, sta_ssid);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t wifi_post_handler(httpd_req_t *req)
+{
+    char body[384];
+    int len = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (len <= 0)
+    {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty body");
+    }
+    body[len] = 0;
+
+    nvs_handle_t h;
+    if (nvs_open(ROLE_NVS_NS, NVS_READWRITE, &h) != ESP_OK)
+    {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "nvs open failed");
+    }
+    int written = 0;
+    for (size_t i = 0; i < sizeof(WIFI_KEYS) / sizeof(WIFI_KEYS[0]); i++)
+    {
+        char val[80];
+        if (httpd_query_key_value(body, WIFI_KEYS[i], val, sizeof(val)) == ESP_OK && val[0] != 0)
+        {
+            url_decode(val);
+            val[64] = 0;
+            nvs_set_str(h, WIFI_KEYS[i], val);
+            written++;
+        }
+    }
+    nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "wifi config: %d key(s) saved, applied at next boot", written);
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_send(req, written ? "OK, saved; reboot to apply" : "nothing to save",
+                           HTTPD_RESP_USE_STRLEN);
+}
+
 static void remember_halow_role(const char *line)
 {
     if (strncasecmp(line, "AT+MODE=", 8) != 0)
@@ -271,6 +367,8 @@ esp_err_t web_server_start(void)
     const httpd_uri_t api_resync = {.uri = "/api/resync", .method = HTTP_POST, .handler = resync_post_handler};
     const httpd_uri_t api_reboot = {.uri = "/api/reboot", .method = HTTP_POST, .handler = reboot_post_handler};
     const httpd_uri_t api_ota = {.uri = "/api/ota", .method = HTTP_POST, .handler = ota_post_handler};
+    const httpd_uri_t api_wifi_get = {.uri = "/api/wifi", .method = HTTP_GET, .handler = wifi_get_handler};
+    const httpd_uri_t api_wifi_post = {.uri = "/api/wifi", .method = HTTP_POST, .handler = wifi_post_handler};
 
     httpd_register_uri_handler(server, &root);
     httpd_register_uri_handler(server, &index_html);
@@ -278,6 +376,8 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &api_resync);
     httpd_register_uri_handler(server, &api_reboot);
     httpd_register_uri_handler(server, &api_ota);
+    httpd_register_uri_handler(server, &api_wifi_get);
+    httpd_register_uri_handler(server, &api_wifi_post);
 
     ESP_LOGI(TAG, "config page up on http://192.168.4.1/");
     return ESP_OK;

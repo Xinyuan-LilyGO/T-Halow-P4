@@ -23,6 +23,13 @@ esp_err_t web_server_start(void);
  */
 void web_server_get_halow_role(char *role, size_t cap);
 
+/*
+ * NVS-backed string from the same namespace (WiFi credentials: "ap_ssid",
+ * "ap_pass", "sta_ssid", "sta_pass" -- saved by POST /api/wifi). `dst` keeps
+ * its content (prime it with the Kconfig default) when never saved.
+ */
+void web_server_get_nvs_str(const char *key, char *dst, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif
