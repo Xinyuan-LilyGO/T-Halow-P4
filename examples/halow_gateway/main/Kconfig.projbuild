@@ -1,0 +1,29 @@
+menu "T-Halow-P4 HaLow gateway example"
+
+config GW_WIFI_STA_SSID
+    string "Home WiFi SSID (C6 joins as station)"
+    default "your-2g4-ssid"
+    help
+        Must be a 2.4 GHz network -- the onboard ESP32-C6 has no 5 GHz radio.
+
+config GW_WIFI_STA_PASSWORD
+    string "Home WiFi password"
+    default ""
+
+config GW_HALOW_IP
+    string "Gateway address on the HaLow BSS"
+    default "10.99.0.1"
+    help
+        The HaLow side runs a DHCP server; clients lease from this /24 and are
+        NAT'd out over the home WiFi. This address is also the gateway and the
+        DNS relay target handed to them.
+
+config GW_HALOW_NETMASK
+    string "HaLow netmask"
+    default "255.255.255.0"
+
+config GW_DNS_FALLBACK
+    string "DNS offered to HaLow clients before the WiFi lease arrives"
+    default "8.8.8.8"
+
+endmenu

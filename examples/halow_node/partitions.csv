@@ -1,0 +1,10 @@
+# Name,   Type, SubType, Offset,  Size, Flags
+# Two OTA slots so firmware updates arrive over POST /api/ota; the board's RST
+# and BOOT are physical buttons, so serial flashing needs hands on the board.
+# nvs keeps its pre-OTA offset: the web-configured HaLow role lives there.
+nvs,      data, nvs,     0x9000,  0x6000,
+otadata,  data, ota,     0xf000,  0x2000,
+phy_init, data, phy,     0x11000, 0x1000,
+ota_0,    app,  ota_0,   0x20000, 4M,
+ota_1,    app,  ota_1,   ,        4M,
+storage,  data, spiffs,  ,        4M,

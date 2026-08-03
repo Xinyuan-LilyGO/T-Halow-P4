@@ -1,0 +1,71 @@
+menu "T-Halow-P4 HaLow node example"
+
+comment "One image, two personalities: the persisted HaLow role selects it."
+comment "sta = router (SoftAP + NAT onto HaLow); ap = gateway (home-WiFi STA"
+comment "+ DHCP server on HaLow). All WiFi credentials here are defaults only;"
+comment "values saved via the portal (POST /api/wifi) override them from NVS."
+
+config NODE_DEFAULT_ROLE_AP
+    bool "Default personality is gateway (HaLow AP)"
+    default n
+    help
+        Only used before a role has ever been set from the config page.
+
+config NODE_WIFI_AP_SSID
+    string "SoftAP SSID (router personality)"
+    default "halow-router"
+
+config NODE_WIFI_AP_PASSWORD
+    string "SoftAP password"
+    default "halowrouter"
+    help
+        WPA2-PSK, at least 8 characters. Empty for an open AP.
+
+config NODE_WIFI_AP_CHANNEL
+    int "SoftAP channel"
+    range 1 13
+    default 1
+
+config NODE_WIFI_STA_SSID
+    string "Home WiFi SSID (gateway personality, 2.4 GHz)"
+    default "your-2g4-ssid"
+
+config NODE_WIFI_STA_PASSWORD
+    string "Home WiFi password"
+    default ""
+
+config NODE_HALOW_GW_IP
+    string "Gateway address on the HaLow BSS (gateway personality)"
+    default "10.99.0.1"
+
+config NODE_HALOW_GW_NETMASK
+    string "HaLow netmask (gateway personality)"
+    default "255.255.255.0"
+
+config NODE_DNS_FALLBACK
+    string "DNS offered to clients before an upstream lease supplies one"
+    default "8.8.8.8"
+
+config NODE_HALOW_USE_DHCP
+    bool "Router personality: obtain the HaLow address by DHCP"
+    default y
+    help
+        The normal topology: lease from a halow_node gateway (or a bridged LAN).
+        Disable for a bare BSS and set the static fields.
+
+config NODE_HALOW_STATIC_IP
+    string "Router personality: static IPv4 address"
+    depends on !NODE_HALOW_USE_DHCP
+    default "10.99.0.2"
+
+config NODE_HALOW_STATIC_NETMASK
+    string "Router personality: static netmask"
+    depends on !NODE_HALOW_USE_DHCP
+    default "255.255.255.0"
+
+config NODE_HALOW_STATIC_GW
+    string "Router personality: static gateway"
+    depends on !NODE_HALOW_USE_DHCP
+    default "10.99.0.1"
+
+endmenu

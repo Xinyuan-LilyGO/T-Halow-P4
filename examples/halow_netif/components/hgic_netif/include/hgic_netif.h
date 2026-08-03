@@ -38,6 +38,13 @@ extern "C" {
  */
 esp_netif_t *hgic_netif_create(const uint8_t mac[6]);
 
+/*
+ * AP-side variant: static address plus a DHCP server for the HaLow BSS.
+ * The interface's own address doubles as the gateway it hands to clients.
+ */
+esp_netif_t *hgic_netif_create_dhcps(const uint8_t mac[6], const char *ip,
+                                     const char *netmask);
+
 /* Stop the DHCP client and assign a fixed address. */
 esp_err_t hgic_netif_set_static_ip(esp_netif_t *netif, const char *ip,
                                    const char *netmask, const char *gw);
@@ -61,6 +68,16 @@ void hgic_netif_set_link(esp_netif_t *netif, bool up);
  * task; the frame is copied, so the caller's buffer may be reused immediately.
  */
 void hgic_netif_input(esp_netif_t *netif, const void *frame, size_t len);
+
+/*
+ * The vendor driver is not re-entrant: TX and RX share hgic global state and the
+ * one SPI bus. TX (hgic_transmit) already serialises on this lock; the RX pump
+ * must take it too, or the two race -- harmless when both run on one core, but a
+ * corruption source once the pump is pinned to a second core. Wrap every SPI
+ * access in the RX task with these.
+ */
+void hgic_netif_spi_lock(void);
+void hgic_netif_spi_unlock(void);
 
 #ifdef __cplusplus
 }
