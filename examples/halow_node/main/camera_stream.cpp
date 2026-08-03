@@ -181,6 +181,13 @@ static void log_dma_heap(const char *when)
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 }
 
+
+/* Defined with the RTP push implementation at the end of this file. */
+static void udp_load_config(void);
+static void udp_stream_task(void *arg);
+static esp_err_t udp_post_handler(httpd_req_t *req);
+static esp_err_t sdp_get_handler(httpd_req_t *req);
+
 // ---------------------------------------------------------------------------
 // Sensor power: SGM38121 rails, then the P4's own LDO for the MIPI PHY.
 // ---------------------------------------------------------------------------
@@ -851,10 +858,15 @@ extern "C" esp_err_t camera_stream_start(void)
     s_sensor_present = true;
     s_session_lock = xSemaphoreCreateMutex();
     load_enabled_flag();
+    udp_load_config();
     ESP_LOGI(TAG, "H.264 stream %s at boot", s_stream_enabled ? "enabled" : "disabled");
     log_dma_heap("idle (sensor found, no buffers)");
 
     if (xTaskCreatePinnedToCore(stream_server_task, "h264_stream", 8192, NULL, 5, NULL, 0) != pdPASS)
+    {
+        return ESP_FAIL;
+    }
+    if (xTaskCreatePinnedToCore(udp_stream_task, "rtp_push", 8192, NULL, 5, NULL, 0) != pdPASS)
     {
         return ESP_FAIL;
     }
@@ -1155,9 +1167,297 @@ extern "C" void camera_web_register(httpd_handle_t server)
 
     static const httpd_uri_t api_camera = {
         .uri = "/api/camera", .method = HTTP_POST, .handler = camera_post_handler, .user_ctx = NULL};
+    static const httpd_uri_t api_udp = {
+        .uri = "/api/udp", .method = HTTP_POST, .handler = udp_post_handler, .user_ctx = NULL};
+    static const httpd_uri_t sdp = {
+        .uri = "/stream.sdp", .method = HTTP_GET, .handler = sdp_get_handler, .user_ctx = NULL};
 
     httpd_register_uri_handler(server, &page);
     httpd_register_uri_handler(server, &preview);
     httpd_register_uri_handler(server, &snapshot);
     httpd_register_uri_handler(server, &api_camera);
+    httpd_register_uri_handler(server, &api_udp);
+    httpd_register_uri_handler(server, &sdp);
+}
+
+// ---------------------------------------------------------------------------
+// RTP over UDP.
+//
+// The field test that motivated this: at 40-50% packet loss the TCP stream
+// collapsed and then could not be re-established -- every reconnection attempt
+// has to win a coin toss for each packet of the handshake -- so video stayed
+// dead for five minutes after the radio had already recovered, while pings
+// were still going through the whole time. A camera in a field should degrade
+// into a blocky picture, not into a connection that will not come back.
+//
+// So this path pushes: no handshake, no session, no state to lose. Frames go
+// out as RFC 6184 RTP, which ffplay/VLC/GStreamer read directly given the SDP
+// served at /stream.sdp. Losing a packet costs a slice; losing a lot costs a
+// GOP, and the next I-frame repairs it.
+// ---------------------------------------------------------------------------
+
+#define RTP_PAYLOAD_TYPE 96
+#define RTP_MAX_PAYLOAD 1100 /* under the HaLow MTU; smaller packets lose less */
+#define UDP_NVS_HOST "udp_host"
+#define UDP_NVS_PORT "udp_port"
+#define UDP_NVS_ON "udp_on"
+
+static char s_udp_host[40];
+static uint16_t s_udp_port = 5004;
+static bool s_udp_enabled = false;
+static uint16_t s_rtp_seq;
+static uint32_t s_rtp_ssrc = 0x5468414C; /* "ThAL" */
+static volatile uint32_t s_udp_frames, s_udp_kbits;
+
+extern "C" bool camera_udp_enabled(void) { return s_udp_enabled; }
+extern "C" const char *camera_udp_host(void) { return s_udp_host; }
+extern "C" uint16_t camera_udp_port(void) { return s_udp_port; }
+extern "C" void camera_udp_stats(uint32_t *frames, uint32_t *kbits)
+{
+    *frames = s_udp_frames;
+    *kbits = s_udp_kbits;
+}
+
+static void udp_save_config(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(CAM_NVS_NS, NVS_READWRITE, &h) == ESP_OK)
+    {
+        nvs_set_str(h, UDP_NVS_HOST, s_udp_host);
+        nvs_set_u16(h, UDP_NVS_PORT, s_udp_port);
+        nvs_set_u8(h, UDP_NVS_ON, s_udp_enabled ? 1 : 0);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static void udp_load_config(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(CAM_NVS_NS, NVS_READONLY, &h) != ESP_OK)
+    {
+        return;
+    }
+    size_t n = sizeof(s_udp_host);
+    nvs_get_str(h, UDP_NVS_HOST, s_udp_host, &n);
+    nvs_get_u16(h, UDP_NVS_PORT, &s_udp_port);
+    uint8_t on = 0;
+    nvs_get_u8(h, UDP_NVS_ON, &on);
+    s_udp_enabled = (on != 0) && (s_udp_host[0] != '\0');
+    nvs_close(h);
+}
+
+extern "C" void camera_udp_configure(const char *host, uint16_t port, bool enable)
+{
+    if (host != NULL && host[0] != '\0')
+    {
+        strlcpy(s_udp_host, host, sizeof(s_udp_host));
+    }
+    if (port != 0)
+    {
+        s_udp_port = port;
+    }
+    s_udp_enabled = enable && (s_udp_host[0] != '\0');
+    udp_save_config();
+    ESP_LOGI(TAG, "RTP push %s -> %s:%u", s_udp_enabled ? "on" : "off", s_udp_host, s_udp_port);
+}
+
+/* One RTP packet: 12-byte header then payload. */
+static bool rtp_send(int sock, const struct sockaddr_in *dst, const uint8_t *payload,
+                     size_t len, uint32_t ts, bool marker)
+{
+    uint8_t pkt[12 + RTP_MAX_PAYLOAD];
+    pkt[0] = 0x80; /* version 2 */
+    pkt[1] = (uint8_t)(RTP_PAYLOAD_TYPE | (marker ? 0x80 : 0));
+    pkt[2] = (uint8_t)(s_rtp_seq >> 8);
+    pkt[3] = (uint8_t)(s_rtp_seq & 0xff);
+    s_rtp_seq++;
+    pkt[4] = (uint8_t)(ts >> 24); pkt[5] = (uint8_t)(ts >> 16);
+    pkt[6] = (uint8_t)(ts >> 8);  pkt[7] = (uint8_t)ts;
+    pkt[8] = (uint8_t)(s_rtp_ssrc >> 24); pkt[9] = (uint8_t)(s_rtp_ssrc >> 16);
+    pkt[10] = (uint8_t)(s_rtp_ssrc >> 8); pkt[11] = (uint8_t)s_rtp_ssrc;
+    memcpy(pkt + 12, payload, len);
+
+    return sendto(sock, pkt, 12 + len, 0, (const struct sockaddr *)dst, sizeof(*dst)) > 0;
+}
+
+/* A NAL, whole if it fits, else split FU-A (RFC 6184 5.8). */
+static void rtp_send_nal(int sock, const struct sockaddr_in *dst, const uint8_t *nal,
+                         size_t len, uint32_t ts, bool last_of_frame)
+{
+    if (len == 0)
+    {
+        return;
+    }
+    if (len <= RTP_MAX_PAYLOAD)
+    {
+        rtp_send(sock, dst, nal, len, ts, last_of_frame);
+        return;
+    }
+
+    const uint8_t hdr = nal[0];
+    const uint8_t fu_indicator = (uint8_t)((hdr & 0xE0) | 28); /* FU-A */
+    const uint8_t nal_type = (uint8_t)(hdr & 0x1F);
+    size_t off = 1, remain = len - 1;
+    uint8_t buf[RTP_MAX_PAYLOAD];
+    bool first = true;
+
+    while (remain > 0)
+    {
+        size_t chunk = remain > (RTP_MAX_PAYLOAD - 2) ? (RTP_MAX_PAYLOAD - 2) : remain;
+        bool last = (chunk == remain);
+        buf[0] = fu_indicator;
+        buf[1] = (uint8_t)((first ? 0x80 : 0) | (last ? 0x40 : 0) | nal_type);
+        memcpy(buf + 2, nal + off, chunk);
+        rtp_send(sock, dst, buf, chunk + 2, ts, last && last_of_frame);
+        off += chunk;
+        remain -= chunk;
+        first = false;
+    }
+}
+
+/* Split an Annex-B access unit and push each NAL. */
+static void rtp_send_frame(int sock, const struct sockaddr_in *dst, const uint8_t *buf,
+                           size_t len, uint32_t ts)
+{
+    size_t i = 0, start = 0;
+    int sc = 0;
+
+    while (i + 3 <= len)
+    {
+        if (buf[i] == 0 && buf[i + 1] == 0 && (buf[i + 2] == 1 ||
+            (i + 4 <= len && buf[i + 2] == 0 && buf[i + 3] == 1)))
+        {
+            size_t sclen = (buf[i + 2] == 1) ? 3 : 4;
+            if (sc > 0)
+            {
+                rtp_send_nal(sock, dst, buf + start, i - start, ts, false);
+            }
+            sc++;
+            i += sclen;
+            start = i;
+            continue;
+        }
+        i++;
+    }
+    if (sc > 0 && start < len)
+    {
+        rtp_send_nal(sock, dst, buf + start, len - start, ts, true); /* marker on the last */
+    }
+}
+
+static void udp_stream_task(void *arg)
+{
+    while (true)
+    {
+        if (!s_udp_enabled || !s_sensor_present)
+        {
+            s_udp_frames = 0;
+            s_udp_kbits = 0;
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        if (xSemaphoreTake(s_session_lock, pdMS_TO_TICKS(2000)) != pdTRUE)
+        {
+            vTaskDelay(pdMS_TO_TICKS(1000)); /* preview or TCP has the camera */
+            continue;
+        }
+        if (pipeline_setup(CAM_ENC_H264) != ESP_OK || !session_start())
+        {
+            ESP_LOGE(TAG, "RTP: pipeline start failed");
+            session_stop();
+            pipeline_teardown();
+            xSemaphoreGive(s_session_lock);
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+
+        int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        struct sockaddr_in dst = {};
+        dst.sin_family = AF_INET;
+        dst.sin_port = htons(s_udp_port);
+        dst.sin_addr.s_addr = esp_ip4addr_aton(s_udp_host);
+
+        ESP_LOGI(TAG, "RTP pushing to %s:%u", s_udp_host, s_udp_port);
+        s_streaming = true;
+        uint32_t frames = 0;
+        uint64_t bytes = 0;
+        int64_t t0 = esp_timer_get_time();
+
+        while (s_udp_enabled && sock >= 0)
+        {
+            size_t len = 0;
+            if (!encode_frame(&len))
+            {
+                ESP_LOGE(TAG, "RTP: pipeline error");
+                break;
+            }
+            /* 90 kHz RTP clock, straight off the monotonic timer. */
+            uint32_t ts = (uint32_t)((esp_timer_get_time() - t0) * 9 / 100);
+            rtp_send_frame(sock, &dst, s_enc_buf, len, ts);
+            encode_frame_done();
+
+            frames++;
+            bytes += len;
+            int64_t dt = esp_timer_get_time() - t0;
+            s_udp_frames = frames;
+            s_udp_kbits = (uint32_t)(bytes * 8e3 / dt);
+            s_stat_viewer = true;
+            s_stat_frame_bytes = (uint32_t)len;
+            s_stat_fps_x10 = (uint32_t)(frames * 1e7 / dt);
+            s_stat_kbits = s_udp_kbits;
+        }
+
+        if (sock >= 0)
+        {
+            close(sock);
+        }
+        s_streaming = false;
+        s_stat_viewer = false;
+        s_stat_fps_x10 = s_stat_kbits = 0;
+        session_stop();
+        pipeline_teardown();
+        xSemaphoreGive(s_session_lock);
+        ESP_LOGI(TAG, "RTP stopped after %" PRIu32 " frames", frames);
+    }
+}
+
+static esp_err_t sdp_get_handler(httpd_req_t *req)
+{
+    char sdp[320];
+    snprintf(sdp, sizeof(sdp),
+             "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=T-Halow-P4 camera\r\n"
+             "c=IN IP4 %s\r\nt=0 0\r\n"
+             "m=video %u RTP/AVP %d\r\n"
+             "a=rtpmap:%d H264/90000\r\n"
+             "a=fmtp:%d packetization-mode=1\r\n",
+             s_udp_host[0] ? s_udp_host : "0.0.0.0", (unsigned)s_udp_port,
+             RTP_PAYLOAD_TYPE, RTP_PAYLOAD_TYPE, RTP_PAYLOAD_TYPE);
+    httpd_resp_set_type(req, "application/sdp");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"halow.sdp\"");
+    return httpd_resp_send(req, sdp, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t udp_post_handler(httpd_req_t *req)
+{
+    char body[128] = {0};
+    int len = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (len <= 0)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "expected host=&port=&enabled=");
+        return ESP_FAIL;
+    }
+
+    char host[40] = {0}, port[8] = {0}, en[8] = {0};
+    httpd_query_key_value(body, "host", host, sizeof(host));
+    httpd_query_key_value(body, "port", port, sizeof(port));
+    httpd_query_key_value(body, "enabled", en, sizeof(en));
+    camera_udp_configure(host, (uint16_t)atoi(port), atoi(en) != 0);
+
+    char json[128];
+    snprintf(json, sizeof(json), "{\"udp_enabled\":%s,\"host\":\"%s\",\"port\":%u}",
+             s_udp_enabled ? "true" : "false", s_udp_host, (unsigned)s_udp_port);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
 }
