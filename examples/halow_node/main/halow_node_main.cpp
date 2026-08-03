@@ -233,12 +233,42 @@ static esp_ping_handle_t s_ping;
 static volatile int32_t s_ping_ms = -1;
 static volatile uint32_t s_ping_sent, s_ping_lost;
 
+/* Loss over the last PING_WINDOW probes. A lifetime average is the wrong
+ * number to walk with: once a few thousand good pings are banked, the
+ * moment the link actually fails barely moves it, and right after a reboot
+ * a handful of bad seconds dominate it. */
+#define PING_WINDOW 30
+static volatile uint8_t s_ping_hist[PING_WINDOW];
+static volatile uint32_t s_ping_idx;
+
+static void ping_record(bool lost)
+{
+    s_ping_hist[s_ping_idx % PING_WINDOW] = lost ? 1 : 0;
+    s_ping_idx++;
+}
+
+static unsigned ping_recent_loss_pct(void)
+{
+    uint32_t n = s_ping_idx < PING_WINDOW ? s_ping_idx : PING_WINDOW;
+    if (n == 0)
+    {
+        return 0;
+    }
+    uint32_t lost = 0;
+    for (uint32_t i = 0; i < n; i++)
+    {
+        lost += s_ping_hist[i];
+    }
+    return (unsigned)((lost * 100 + n / 2) / n);
+}
+
 static void ping_reply(esp_ping_handle_t hdl, void *args)
 {
     uint32_t elapsed = 0;
     esp_ping_get_profile(hdl, ESP_PING_PROF_TIMEGAP, &elapsed, sizeof(elapsed));
     s_ping_ms = (int32_t)elapsed;
     s_ping_sent++;
+    ping_record(false);
 }
 
 static void ping_timeout(esp_ping_handle_t hdl, void *args)
@@ -246,6 +276,7 @@ static void ping_timeout(esp_ping_handle_t hdl, void *args)
     s_ping_ms = -1;
     s_ping_sent++;
     s_ping_lost++;
+    ping_record(true);
 }
 
 static void start_link_probe(const esp_ip4_addr_t *gw)
@@ -291,16 +322,20 @@ static esp_err_t link_get_handler(httpd_req_t *req)
     camera_stream_stats(&viewer, &fps_x10, &kbits, &frame_bytes);
 
     uint32_t sent = s_ping_sent, lost = s_ping_lost;
-    unsigned loss_pct = sent ? (unsigned)((lost * 100 + sent / 2) / sent) : 0;
+    unsigned loss_all = sent ? (unsigned)((lost * 100 + sent / 2) / sent) : 0;
+    unsigned loss_pct = ping_recent_loss_pct();
 
     char json[320];
     snprintf(json, sizeof(json),
              "{\"halow_up\":%s,\"rssi\":%d,\"evm\":%d,\"snr\":%d,\"tx_bitrate\":%d,"
-             "\"ping_ms\":%ld,\"loss_pct\":%u,\"pings\":%lu,"
+             "\"ping_ms\":%ld,\"loss_pct\":%u,\"loss_all_pct\":%u,\"pings\":%lu,"
+             "\"stream_enabled\":%s,\"stream_fails\":%lu,"
              "\"viewer\":%s,\"fps\":%.1f,\"kbits\":%lu,\"frame_bytes\":%lu}",
              hgic.status.conn_state ? "true" : "false", link_rssi(), link_evm(),
              (int)hgic.sta_list[0].rx_snr, hgic.status.tx_bitrate, (long)s_ping_ms,
-             loss_pct, (unsigned long)sent,
+             loss_pct, loss_all, (unsigned long)sent,
+             camera_stream_enabled() ? "true" : "false",
+             (unsigned long)camera_stream_failures(),
              viewer ? "true" : "false", fps_x10 / 10.0, (unsigned long)kbits,
              (unsigned long)frame_bytes);
 
@@ -316,11 +351,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     char json[320];
     snprintf(json, sizeof(json),
              "{\"role\":\"%s\",\"personality\":\"%s\",\"built\":\"%s %s\","
-             "\"camera\":\"%s\",\"stream_port\":%d,\"portmap\":%s,"
+             "\"camera\":\"%s\",\"stream_port\":%d,\"stream_enabled\":%s,\"portmap\":%s,"
              "\"uptime_s\":%lld,\"heap_dma\":%u,\"heap_dma_largest\":%u}",
              s_gateway ? "ap" : "sta", s_gateway ? "gateway" : "router",
              __DATE__, __TIME__, camera_stream_state(), CONFIG_NODE_STREAM_PORT,
-             s_portmap_up ? "true" : "false",
+             camera_stream_enabled() ? "true" : "false", s_portmap_up ? "true" : "false",
              (long long)(esp_timer_get_time() / 1000000),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT),
              /* the number that actually predicts whether the H.264 encoder

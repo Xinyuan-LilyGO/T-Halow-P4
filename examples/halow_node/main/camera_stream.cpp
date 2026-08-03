@@ -39,6 +39,7 @@
 #include "esp_timer.h"
 #include "driver/i2c_master.h"
 #include "esp_heap_caps.h"
+#include "nvs.h"
 /*
  * lwip/sockets.h must come first: it redefines _IO/_IOR/_IOW with the BSD
  * encoding, and VIDIOC_* expand those macros at the point of use. Included
@@ -96,6 +97,57 @@ static int32_t s_jpeg_quality = CONFIG_NODE_JPEG_QUALITY;
 
 static bool s_sensor_present = false;
 static bool s_streaming = false;
+
+/*
+ * Master switch for the H.264 server, persisted so it survives the reboots
+ * a field unit does on its own. Off means the pipeline is never built: no
+ * encoder, no per-viewer setup/teardown, nothing competing for the radio --
+ * which is what you want when the point of the exercise is to measure the
+ * link itself rather than to watch through it. The browser preview is
+ * deliberately not gated by this: it only runs while someone holds the page
+ * open, so it cannot churn away in the background.
+ */
+static bool s_stream_enabled = true;
+static uint32_t s_start_failures = 0;
+
+extern "C" uint32_t camera_stream_failures(void)
+{
+    return s_start_failures;
+}
+
+#define CAM_NVS_NS "router"
+#define CAM_NVS_KEY "cam_stream"
+
+extern "C" bool camera_stream_enabled(void)
+{
+    return s_stream_enabled;
+}
+
+extern "C" void camera_stream_set_enabled(bool enable)
+{
+    s_stream_enabled = enable;
+
+    nvs_handle_t h;
+    if (nvs_open(CAM_NVS_NS, NVS_READWRITE, &h) == ESP_OK)
+    {
+        nvs_set_u8(h, CAM_NVS_KEY, enable ? 1 : 0);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    ESP_LOGI(TAG, "H.264 stream %s", enable ? "enabled" : "disabled");
+}
+
+static void load_enabled_flag(void)
+{
+    nvs_handle_t h;
+    uint8_t v = 1;
+    if (nvs_open(CAM_NVS_NS, NVS_READONLY, &h) == ESP_OK)
+    {
+        nvs_get_u8(h, CAM_NVS_KEY, &v);
+        nvs_close(h);
+    }
+    s_stream_enabled = (v != 0);
+}
 
 /* One camera, one pipeline: the H.264 server and the browser preview take
  * turns rather than fighting over the sensor. */
@@ -620,14 +672,21 @@ static void serve_client(int client)
 #endif
             xSemaphoreGive(s_session_lock);
 
-            if (esp_timer_get_time() > 120 * 1000000LL)
-            {
-                ESP_LOGE(TAG, "camera pipeline unrecoverable (heap fragmented), restarting");
-                vTaskDelay(pdMS_TO_TICKS(250));
-                esp_restart();
-            }
-            ESP_LOGE(TAG, "session start failed this early in the boot -- not a "
-                          "fragmentation problem, leaving the node up");
+            /* This used to restart the node on the theory that only a fresh
+             * heap fixes fragmentation. In the field that was the wrong
+             * trade: at the edge of range the link drops often, every drop
+             * rebuilds the pipeline, and the node rebooted repeatedly in the
+             * middle of a range test -- losing the link telemetry, which was
+             * the thing actually worth having. Fail the viewer instead and
+             * stay up; the failure is visible in /api/status as a
+             * heap_dma_largest below the ~90 kB the encoder needs, and
+             * POST /api/reboot is one request away when a restart really is
+             * what is wanted. */
+            s_start_failures++;
+            ESP_LOGE(TAG, "h264 start failed (largest DMA block %u, encoder needs ~92 kB); "
+                          "node staying up, stream unavailable until reboot",
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                                MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
             return;
         }
         ESP_LOGW(TAG, "h264 start needed a retry");
@@ -715,6 +774,14 @@ static void stream_server_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
+        if (!s_stream_enabled)
+        {
+            /* Closing immediately tells the puller straight away rather than
+             * leaving it waiting on a stream that will never start. */
+            close(client);
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
         ESP_LOGI(TAG, "stream client connected");
         serve_client(client);
         close(client);
@@ -783,6 +850,8 @@ extern "C" esp_err_t camera_stream_start(void)
     }
     s_sensor_present = true;
     s_session_lock = xSemaphoreCreateMutex();
+    load_enabled_flag();
+    ESP_LOGI(TAG, "H.264 stream %s at boot", s_stream_enabled ? "enabled" : "disabled");
     log_dma_heap("idle (sensor found, no buffers)");
 
     if (xTaskCreatePinnedToCore(stream_server_task, "h264_stream", 8192, NULL, 5, NULL, 0) != pdPASS)
@@ -979,13 +1048,30 @@ button{background:#2c2c2e;color:#eee;border:0;border-radius:7px;padding:9px 13px
   <div class=card><div class=k>Radio rate</div><div class=v><span id=rate>-</span> <span style=font-size:13px>kb/s</span></div></div>
   <div class=card><div class=k>Video to house</div><div class=v><span id=vid>-</span></div></div>
 </div>
+<div class=card style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+  <div>
+    <div class=k>H.264 stream to the house</div>
+    <div style="font-size:12px;color:#8c8c92;margin-top:3px">Turn off for a link-only range test &mdash; no encoder, no reconnect churn.</div>
+  </div>
+  <button id=sw onclick="setStream()" style="min-width:104px">&hellip;</button>
+</div>
 <button id=tog onclick="toggle()">start preview</button>
 <button onclick="q=Math.max(10,q-15);if(on)start()">lower quality</button>
 <button onclick="q=Math.min(90,q+15);if(on)start()">higher quality</button>
 <button onclick="pk=0">reset peak</button>
 <p style="color:#8c8c92;font-size:13px">The camera does one job at a time: while the preview is on, the H.264 stream to the house is refused, and vice versa. RSSI, ping and loss keep updating either way &mdash; they come over this node's own WiFi, not over HaLow.</p>
 <script>
-var q=40,pk=0,on=false;
+var q=40,pk=0,on=false,se=true;
+function setStream(){
+ se=!se;
+ fetch('/api/camera',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+   body:'enabled='+(se?1:0)}).then(r=>r.json()).then(d=>{se=d.stream_enabled;paint()}).catch(()=>{});
+}
+function paint(){
+ var b=document.getElementById('sw');
+ b.textContent=se?'stream ON':'stream OFF';
+ b.style.background=se?'#2b6':'#633';
+}
 function start(){document.getElementById('v').src='/preview.mjpg?q='+q+'&t='+Date.now()}
 function toggle(){
  on=!on;
@@ -1015,10 +1101,37 @@ setInterval(function(){
   var ls=document.getElementById('loss');
   ls.textContent=d.loss_pct;
   ls.className=d.loss_pct>20?'bad':(d.loss_pct>5?'warn':'ok');
-  document.getElementById('vid').textContent=d.viewer?(d.kbits+' kb/s'):'no viewer';
+  document.getElementById('vid').textContent=d.stream_enabled?(d.viewer?(d.kbits+' kb/s'):'no viewer'):'disabled';
+  if(d.stream_enabled!==undefined&&d.stream_enabled!==se){se=d.stream_enabled;}
+  paint();
  }).catch(function(){});
 },1000);
 </script></body></html>)HTML";
+
+static esp_err_t camera_post_handler(httpd_req_t *req)
+{
+    char body[64] = {0};
+    int len = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (len <= 0)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "expected enabled=0|1");
+        return ESP_FAIL;
+    }
+
+    char value[8] = {0};
+    if (httpd_query_key_value(body, "enabled", value, sizeof(value)) != ESP_OK)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "expected enabled=0|1");
+        return ESP_FAIL;
+    }
+    camera_stream_set_enabled(atoi(value) != 0);
+
+    char json[64];
+    snprintf(json, sizeof(json), "{\"stream_enabled\":%s}",
+             camera_stream_enabled() ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+}
 
 static esp_err_t camera_page_handler(httpd_req_t *req)
 {
@@ -1035,7 +1148,11 @@ extern "C" void camera_web_register(httpd_handle_t server)
     static const httpd_uri_t snapshot = {
         .uri = "/snapshot.jpg", .method = HTTP_GET, .handler = snapshot_get_handler, .user_ctx = NULL};
 
+    static const httpd_uri_t api_camera = {
+        .uri = "/api/camera", .method = HTTP_POST, .handler = camera_post_handler, .user_ctx = NULL};
+
     httpd_register_uri_handler(server, &page);
     httpd_register_uri_handler(server, &preview);
     httpd_register_uri_handler(server, &snapshot);
+    httpd_register_uri_handler(server, &api_camera);
 }

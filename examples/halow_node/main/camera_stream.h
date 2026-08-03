@@ -45,6 +45,17 @@ void camera_web_register(httpd_handle_t server);
 void camera_stream_stats(bool *viewer, uint32_t *fps_x10, uint32_t *kbits,
                          uint32_t *frame_bytes);
 
+/*
+ * Master switch for the H.264 server (POST /api/camera enabled=0|1),
+ * persisted in NVS. Off means the pipeline is never built, so a range test
+ * measures the link and nothing else.
+ */
+bool camera_stream_enabled(void);
+void camera_stream_set_enabled(bool enable);
+
+/* Times the encoder could not start, usually a fragmented internal heap. */
+uint32_t camera_stream_failures(void);
+
 #ifdef __cplusplus
 }
 #endif
