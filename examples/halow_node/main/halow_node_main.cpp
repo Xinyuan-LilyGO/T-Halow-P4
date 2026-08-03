@@ -330,12 +330,15 @@ static esp_err_t link_get_handler(httpd_req_t *req)
              "{\"halow_up\":%s,\"rssi\":%d,\"evm\":%d,\"snr\":%d,\"tx_bitrate\":%d,"
              "\"ping_ms\":%ld,\"loss_pct\":%u,\"loss_all_pct\":%u,\"pings\":%lu,"
              "\"stream_enabled\":%s,\"stream_fails\":%lu,"
+             "\"udp_enabled\":%s,\"udp_host\":\"%s\",\"udp_port\":%u,"
              "\"viewer\":%s,\"fps\":%.1f,\"kbits\":%lu,\"frame_bytes\":%lu}",
              hgic.status.conn_state ? "true" : "false", link_rssi(), link_evm(),
              (int)hgic.sta_list[0].rx_snr, hgic.status.tx_bitrate, (long)s_ping_ms,
              loss_pct, loss_all, (unsigned long)sent,
              camera_stream_enabled() ? "true" : "false",
              (unsigned long)camera_stream_failures(),
+             camera_udp_enabled() ? "true" : "false", camera_udp_host(),
+             (unsigned)camera_udp_port(),
              viewer ? "true" : "false", fps_x10 / 10.0, (unsigned long)kbits,
              (unsigned long)frame_bytes);
 

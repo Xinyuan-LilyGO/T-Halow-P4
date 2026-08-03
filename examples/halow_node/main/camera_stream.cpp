@@ -1061,9 +1061,16 @@ button{background:#2c2c2e;color:#eee;border:0;border-radius:7px;padding:9px 13px
   <div class=card><div class=k>Radio rate</div><div class=v><span id=rate>-</span> <span style=font-size:13px>kb/s</span></div></div>
   <div class=card><div class=k>Video to house</div><div class=v><span id=vid>-</span></div></div>
 </div>
-<div class=card style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+<div class=card style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
   <div>
-    <div class=k>H.264 stream to the house</div>
+    <div class=k>RTP push (UDP) &mdash; survives a bad link</div>
+    <div style="font-size:12px;color:#8c8c92;margin-top:3px">Sends to <span id=uh>-</span>. No connection to lose, so it resumes on its own.</div>
+  </div>
+  <button id=usw onclick="setUdp()" style="min-width:104px">&hellip;</button>
+</div>
+<div class=card style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+  <div>
+    <div class=k>H.264 stream to the house (TCP)</div>
     <div style="font-size:12px;color:#8c8c92;margin-top:3px">Turn off for a link-only range test &mdash; no encoder, no reconnect churn.</div>
   </div>
   <button id=sw onclick="setStream()" style="min-width:104px">&hellip;</button>
@@ -1074,7 +1081,18 @@ button{background:#2c2c2e;color:#eee;border:0;border-radius:7px;padding:9px 13px
 <button onclick="pk=0">reset peak</button>
 <p style="color:#8c8c92;font-size:13px">The camera does one job at a time: while the preview is on, the H.264 stream to the house is refused, and vice versa. RSSI, ping and loss keep updating either way &mdash; they come over this node's own WiFi, not over HaLow.</p>
 <script>
-var q=40,pk=0,on=false,se=true;
+var q=40,pk=0,on=false,se=true,ue=false;
+function setUdp(){
+ ue=!ue;
+ fetch('/api/udp',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+   body:'enabled='+(ue?1:0)}).then(r=>r.json()).then(d=>{ue=d.udp_enabled;paintUdp(d)}).catch(()=>{});
+}
+function paintUdp(d){
+ var b=document.getElementById('usw');
+ b.textContent=ue?'RTP ON':'RTP OFF';
+ b.style.background=ue?'#2b6':'#633';
+ if(d&&d.host)document.getElementById('uh').textContent=d.host+':'+d.port;
+}
 function setStream(){
  se=!se;
  fetch('/api/camera',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
@@ -1121,6 +1139,7 @@ setInterval(function(){
   document.getElementById('vid').textContent=d.stream_enabled?(d.viewer?(d.kbits+' kb/s'):'no viewer'):'disabled';
   if(d.stream_enabled!==undefined&&d.stream_enabled!==se){se=d.stream_enabled;}
   paint();
+  if(d.udp_enabled!==undefined){ue=d.udp_enabled;paintUdp({host:d.udp_host,port:d.udp_port});}
  }).catch(function(){});
 },1000);
 </script></body></html>)HTML";

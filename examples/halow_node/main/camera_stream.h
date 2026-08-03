@@ -56,6 +56,13 @@ void camera_stream_set_enabled(bool enable);
 /* Times the encoder could not start, usually a fragmented internal heap. */
 uint32_t camera_stream_failures(void);
 
+/* RTP-over-UDP push: connectionless, so a bad link costs picture, not the
+ * session. Destination persisted; POST /api/udp host=&port=&enabled=. */
+bool camera_udp_enabled(void);
+const char *camera_udp_host(void);
+uint16_t camera_udp_port(void);
+void camera_udp_configure(const char *host, uint16_t port, bool enable);
+
 #ifdef __cplusplus
 }
 #endif
