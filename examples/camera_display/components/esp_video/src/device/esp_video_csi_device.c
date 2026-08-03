@@ -342,8 +342,10 @@ static esp_err_t csi_video_init(struct esp_video *video)
     return ESP_OK;
 
 fail_0:
-    esp_ldo_release_channel(csi_video->ldo_handle);
-    csi_video->ldo_handle = NULL;
+    if (csi_video->ldo_handle) {
+        esp_ldo_release_channel(csi_video->ldo_handle);
+        csi_video->ldo_handle = NULL;
+    }
     return ret;
 }
 
@@ -449,8 +451,14 @@ static esp_err_t csi_video_deinit(struct esp_video *video)
 {
     struct csi_video *csi_video = VIDEO_PRIV_DATA(struct csi_video *, video);
 
-    ESP_RETURN_ON_ERROR(esp_ldo_release_channel(csi_video->ldo_handle), TAG, "failed to release LDO");
-    csi_video->ldo_handle = NULL;
+    /* The acquire in csi_video_init is commented out on this board (the
+     * application owns the MIPI LDO), so there is normally nothing to give
+     * back -- releasing the NULL handle failed and took the whole deinit
+     * path down with it. Only release what we actually took. */
+    if (csi_video->ldo_handle) {
+        ESP_RETURN_ON_ERROR(esp_ldo_release_channel(csi_video->ldo_handle), TAG, "failed to release LDO");
+        csi_video->ldo_handle = NULL;
+    }
 
     return ESP_OK;
 }

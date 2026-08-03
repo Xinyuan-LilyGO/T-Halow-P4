@@ -13,8 +13,14 @@ CONFIG_ESP32P4_REV_MIN_0=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_SPEED_200M=y
 CONFIG_SPIRAM_XIP_FROM_PSRAM=y
-# CONFIG_CACHE_L2_CACHE_256KB=y
-CONFIG_CACHE_L2_CACHE_512KB=y
+# The P4's 768 KB of SRAM is shared between the L2 cache and the heap, so the
+# 512 KB cache the other examples use leaves only ~40 KB of internal heap free
+# at boot -- and the hardware H.264 encoder wants a ~90 KB reference frame
+# (1152 * macroblock-width) that it will only take from internal memory.
+# Halving the cache buys back 256 KB of SRAM, which is what makes the camera
+# pipeline fit at 720p.
+CONFIG_CACHE_L2_CACHE_256KB=y
+# CONFIG_CACHE_L2_CACHE_512KB=y
 CONFIG_CACHE_L2_CACHE_LINE_128B=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240
 CONFIG_FREERTOS_HZ=1000
@@ -28,3 +34,20 @@ CONFIG_LWIP_IPV4_NAPT=y
 
 # OTA: roll back automatically if a new image never marks itself valid
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Camera streaming: CSI capture -> ISP -> hardware H.264 (camera_stream.cpp).
+# Sensor mode matches the shipped module (OV2710, verified on hardware).
+CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE=y
+CONFIG_ESP_VIDEO_DISABLE_MIPI_CSI_DRIVER_BACKUP_BUFFER=y
+CONFIG_ESP_VIDEO_ENABLE_ISP=y
+CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE=y
+CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
+CONFIG_ESP_VIDEO_ENABLE_HW_H264_VIDEO_DEVICE=y
+CONFIG_CAMERA_OV2710=y
+CONFIG_CAMERA_OV2710_AUTO_DETECT=y
+CONFIG_CAMERA_OV2710_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
+CONFIG_CAMERA_OV2710_MIPI_RAW10_1280X720_25FPS=y
+CONFIG_CAMERA_OV2710_MIPI_IF_FORMAT_INDEX_DAFAULT=1
+
+# Let the home LAN reach the camera's stream through the gateway's NAT.
+CONFIG_LWIP_IPV4_NAPT_PORTMAP=y
