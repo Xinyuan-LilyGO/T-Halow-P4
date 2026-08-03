@@ -1043,6 +1043,7 @@ button{background:#2c2c2e;color:#eee;border:0;border-radius:7px;padding:9px 13px
 <div class=grid>
   <div class=card><div class=k>HaLow</div><div class="v" id=lnk>-</div></div>
   <div class=card><div class=k>RSSI</div><div class=v><span id=rssi>-</span> <span style=font-size:13px>dBm</span></div></div>
+  <div class=card><div class=k>SNR &mdash; watch this one</div><div class=v id=snr>-</div></div>
   <div class=card><div class=k>Ping gateway</div><div class=v><span id=rtt>-</span> <span style=font-size:13px>ms</span></div></div>
   <div class=card><div class=k>Loss</div><div class=v><span id=loss>-</span> <span style=font-size:13px>%</span></div></div>
   <div class=card><div class=k>Radio rate</div><div class=v><span id=rate>-</span> <span style=font-size:13px>kb/s</span></div></div>
@@ -1094,6 +1095,10 @@ setInterval(function(){
   l.textContent=d.halow_up?'associated':'DOWN';
   l.className='v '+(d.halow_up?'ok':'bad');
   document.getElementById('rssi').textContent=d.rssi;
+  var sn=document.getElementById('snr');
+  sn.textContent=d.snr;
+  /* walk 1: clean at SNR 18, gone at 17 -- the cliff is that sharp */
+  sn.className='v '+(d.snr<20?'bad':(d.snr<28?'warn':'ok'));
   document.getElementById('rate').textContent=d.tx_bitrate;
   var rt=document.getElementById('rtt');
   rt.textContent=d.ping_ms<0?'--':d.ping_ms;
