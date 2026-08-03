@@ -33,6 +33,7 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_ota_ops.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_wifi_remote.h"
 #include "esp_wifi.h"
@@ -316,12 +317,16 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     snprintf(json, sizeof(json),
              "{\"role\":\"%s\",\"personality\":\"%s\",\"built\":\"%s %s\","
              "\"camera\":\"%s\",\"stream_port\":%d,\"portmap\":%s,"
-             "\"uptime_s\":%lld,\"heap_dma\":%u}",
+             "\"uptime_s\":%lld,\"heap_dma\":%u,\"heap_dma_largest\":%u}",
              s_gateway ? "ap" : "sta", s_gateway ? "gateway" : "router",
              __DATE__, __TIME__, camera_stream_state(), CONFIG_NODE_STREAM_PORT,
              s_portmap_up ? "true" : "false",
              (long long)(esp_timer_get_time() / 1000000),
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT),
+             /* the number that actually predicts whether the H.264 encoder
+              * can start: it wants ~90 kB contiguous, and free total says
+              * nothing about that once the heap has fragmented */
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);

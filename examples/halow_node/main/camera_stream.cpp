@@ -595,14 +595,42 @@ static void serve_client(int client)
 
     if (!session_start())
     {
-        ESP_LOGE(TAG, "session start failed");
+        /* Almost always the encoder failing to find a contiguous ~90 kB for
+         * its reference frame: building and tearing the pipeline down for
+         * each viewer, and alternating with the JPEG preview, fragments the
+         * internal DMA heap until the largest free block drops below what it
+         * needs -- with plenty still free in total. One retry costs nothing;
+         * if it persists, only a fresh heap fixes it, so take one. The node
+         * is back in ~25 s, keeps its role and rolls back on a bad image, and
+         * an unattended camera that fixes itself beats one that needs a
+         * visit. The uptime guard keeps a boot-time fault (which a restart
+         * cannot fix) from becoming a restart loop. */
         session_stop();
         pipeline_teardown();
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        bool recovered = (pipeline_setup(CAM_ENC_H264) == ESP_OK) && session_start();
+        if (!recovered)
+        {
+            session_stop();
+            pipeline_teardown();
+            log_dma_heap("after failed h264 start");
 #if CONFIG_NODE_STREAM_STOPS_WIFI
-        esp_wifi_start();
+            esp_wifi_start();
 #endif
-        xSemaphoreGive(s_session_lock);
-        return;
+            xSemaphoreGive(s_session_lock);
+
+            if (esp_timer_get_time() > 120 * 1000000LL)
+            {
+                ESP_LOGE(TAG, "camera pipeline unrecoverable (heap fragmented), restarting");
+                vTaskDelay(pdMS_TO_TICKS(250));
+                esp_restart();
+            }
+            ESP_LOGE(TAG, "session start failed this early in the boot -- not a "
+                          "fragmentation problem, leaving the node up");
+            return;
+        }
+        ESP_LOGW(TAG, "h264 start needed a retry");
     }
 
     uint32_t frames = 0;
@@ -933,7 +961,11 @@ button{background:#2c2c2e;color:#eee;border:0;border-radius:7px;padding:9px 13px
 .ok{color:#6d6}.bad{color:#f66}.warn{color:#fb4}
 </style></head><body>
 <h1>T-Halow-P4 &mdash; focus &amp; range</h1>
-<img id=v alt="camera preview">
+<img id=v alt="camera preview" style="display:none">
+<div id=off class=card style="text-align:center;padding:22px;color:#8c8c92">
+  Preview is off &mdash; the camera is free for the H.264 stream going home.<br>
+  Turn it on to focus the lens; turn it off again before a range walk.
+</div>
 <div class=card style="margin-top:10px">
   <div class=k>Focus &mdash; turn the lens for the highest number</div>
   <div class=v><span id=f>-</span> <span style="font-size:13px;color:#8c8c92">kB/frame &nbsp; peak <span id=pk>-</span></span></div>
@@ -947,14 +979,22 @@ button{background:#2c2c2e;color:#eee;border:0;border-radius:7px;padding:9px 13px
   <div class=card><div class=k>Radio rate</div><div class=v><span id=rate>-</span> <span style=font-size:13px>kb/s</span></div></div>
   <div class=card><div class=k>Video to house</div><div class=v><span id=vid>-</span></div></div>
 </div>
-<button onclick="q=Math.max(10,q-15);start()">lower quality</button>
-<button onclick="q=Math.min(90,q+15);start()">higher quality</button>
+<button id=tog onclick="toggle()">start preview</button>
+<button onclick="q=Math.max(10,q-15);if(on)start()">lower quality</button>
+<button onclick="q=Math.min(90,q+15);if(on)start()">higher quality</button>
 <button onclick="pk=0">reset peak</button>
-<p style="color:#8c8c92;font-size:13px">Preview stops while the H.264 stream is being watched &mdash; the camera does one job at a time.</p>
+<p style="color:#8c8c92;font-size:13px">The camera does one job at a time: while the preview is on, the H.264 stream to the house is refused, and vice versa. RSSI, ping and loss keep updating either way &mdash; they come over this node's own WiFi, not over HaLow.</p>
 <script>
-var q=40,pk=0;
+var q=40,pk=0,on=false;
 function start(){document.getElementById('v').src='/preview.mjpg?q='+q+'&t='+Date.now()}
-start();
+function toggle(){
+ on=!on;
+ var v=document.getElementById('v');
+ document.getElementById('off').style.display=on?'none':'';
+ v.style.display=on?'':'none';
+ document.getElementById('tog').textContent=on?'stop preview':'start preview';
+ if(on){start()}else{v.src='';}
+}
 setInterval(function(){
  fetch('/api/link').then(r=>r.json()).then(function(d){
   var kb=d.frame_bytes/1024;
