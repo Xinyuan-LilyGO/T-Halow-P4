@@ -6,6 +6,9 @@
 #pragma once
 
 #include "esp_err.h"
+#include <stdbool.h>
+#include <stdint.h>
+#include "esp_http_server.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,6 +29,21 @@ esp_err_t camera_stream_start(void);
 
 /* "absent" (no sensor), "idle" (listening, no pipeline held) or "streaming". */
 const char *camera_stream_state(void);
+
+/*
+ * Register the browser front end on an already-running server:
+ *   /camera        focus + range page, sized for a phone
+ *   /preview.mjpg  MJPEG stream (?q=5..95), what an <img> can actually show
+ *   /snapshot.jpg  single frame
+ */
+void camera_web_register(httpd_handle_t server);
+
+/*
+ * Live figures for /api/link. `frame_bytes` is the last encoded frame size,
+ * which at fixed JPEG quality peaks when the lens is sharp -- the focus aid.
+ */
+void camera_stream_stats(bool *viewer, uint32_t *fps_x10, uint32_t *kbits,
+                         uint32_t *frame_bytes);
 
 #ifdef __cplusplus
 }

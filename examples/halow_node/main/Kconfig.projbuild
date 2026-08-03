@@ -92,6 +92,15 @@ config NODE_STREAM_STOPS_WIFI
         Left here as a switch, off by default, since a field unit that
         never serves its SoftAP may still want the radio quiet.
 
+config NODE_JPEG_QUALITY
+    int "Default JPEG quality for the browser preview (5-95)"
+    range 5 95
+    default 40
+    help
+        The /camera page can raise or lower this live; the default is chosen
+        to keep frames small enough to preview over HaLow as well as over
+        the node's own SoftAP.
+
 config NODE_H264_BITRATE
     int "H.264 target bitrate (bit/s)"
     default 800000

@@ -31,6 +31,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_err.h"
 #include "esp_ldo_regulator.h"
 #include "esp_wifi.h"
@@ -48,6 +49,7 @@
  * fails the build rather than let that come back.
  */
 #include "lwip/sockets.h"
+#include "esp_http_server.h"
 #include "linux/videodev2.h"
 #include "esp_video_init.h"
 #include "esp_video_device.h"
@@ -70,6 +72,8 @@ static const char *TAG = "cam_stream";
 
 #define CAP_BUFFER_COUNT 2
 #define SKIP_STARTUP_FRAMES 2
+/* ~0.7 s at 22 fps: enough for AE/AGC to settle on a still. */
+#define SNAPSHOT_SETTLE_FRAMES 16
 
 static int s_cap_fd = -1;
 static int s_m2m_fd = -1;
@@ -80,8 +84,35 @@ static size_t s_enc_buf_len;
 static esp_video_init_csi_config_t s_csi_config;
 static esp_video_init_config_t s_video_config;
 
+typedef enum
+{
+    CAM_ENC_H264,
+    CAM_ENC_JPEG,
+} cam_encoder_t;
+
+static cam_encoder_t s_encoder = CAM_ENC_H264;
+static uint32_t s_width, s_height;
+static int32_t s_jpeg_quality = CONFIG_NODE_JPEG_QUALITY;
+
 static bool s_sensor_present = false;
 static bool s_streaming = false;
+
+/* One camera, one pipeline: the H.264 server and the browser preview take
+ * turns rather than fighting over the sensor. */
+static SemaphoreHandle_t s_session_lock;
+
+/* Live figures for /api/link -- what a phone watches while walking away. */
+static volatile uint32_t s_stat_fps_x10, s_stat_kbits, s_stat_frame_bytes;
+static volatile bool s_stat_viewer;
+
+extern "C" void camera_stream_stats(bool *viewer, uint32_t *fps_x10, uint32_t *kbits,
+                                    uint32_t *frame_bytes)
+{
+    *viewer = s_stat_viewer;
+    *fps_x10 = s_stat_fps_x10;
+    *kbits = s_stat_kbits;
+    *frame_bytes = s_stat_frame_bytes;
+}
 
 extern "C" const char *camera_stream_state(void)
 {
@@ -162,14 +193,15 @@ static esp_err_t sgm38121_power_up(i2c_master_bus_handle_t bus)
 // re-queues them and toggles STREAMON/STREAMOFF.
 // ---------------------------------------------------------------------------
 
-static esp_err_t set_codec_control(int fd, uint32_t id, int32_t value)
+static esp_err_t set_codec_control(int fd, uint32_t id, int32_t value,
+                                   uint32_t ctrl_class = V4L2_CID_CODEC_CLASS)
 {
     struct v4l2_ext_controls controls;
     struct v4l2_ext_control control[1];
 
     memset(&controls, 0, sizeof(controls));
     memset(control, 0, sizeof(control));
-    controls.ctrl_class = V4L2_CID_CODEC_CLASS;
+    controls.ctrl_class = ctrl_class;
     controls.count = 1;
     controls.controls = control;
     control[0].id = id;
@@ -183,13 +215,22 @@ static esp_err_t set_codec_control(int fd, uint32_t id, int32_t value)
     return ESP_OK;
 }
 
-static esp_err_t pipeline_setup(void)
+static esp_err_t pipeline_setup(cam_encoder_t enc)
 {
     struct v4l2_format format;
     struct v4l2_requestbuffers req;
     struct v4l2_buffer buf;
     uint32_t width, height;
 
+    /* The two encoders want different things off the ISP: the H.264 core
+     * only accepts YUV420, the JPEG core takes RGB565 (and subsamples to
+     * 4:2:2 itself). Everything downstream is identical. */
+    const bool jpeg = (enc == CAM_ENC_JPEG);
+    const uint32_t cap_pixfmt = jpeg ? V4L2_PIX_FMT_RGB565 : V4L2_PIX_FMT_YUV420;
+    const uint32_t out_pixfmt = jpeg ? V4L2_PIX_FMT_JPEG : V4L2_PIX_FMT_H264;
+    const char *enc_dev = jpeg ? ESP_VIDEO_JPEG_DEVICE_NAME : ESP_VIDEO_H264_DEVICE_NAME;
+
+    s_encoder = enc;
     s_cap_fd = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDONLY);
     if (s_cap_fd < 0)
     {
@@ -207,15 +248,14 @@ static esp_err_t pipeline_setup(void)
     width = format.fmt.pix.width;
     height = format.fmt.pix.height;
 
-    /* Capture YUV420 from the ISP -- the layout the H.264 encoder consumes. */
     memset(&format, 0, sizeof(format));
     format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     format.fmt.pix.width = width;
     format.fmt.pix.height = height;
-    format.fmt.pix.pixelformat = V4L2_PIX_FMT_YUV420;
+    format.fmt.pix.pixelformat = cap_pixfmt;
     if (ioctl(s_cap_fd, VIDIOC_S_FMT, &format) != 0)
     {
-        ESP_LOGE(TAG, "set YUV420 %" PRIu32 "x%" PRIu32 " failed", width, height);
+        ESP_LOGE(TAG, "set capture format %" PRIu32 "x%" PRIu32 " failed", width, height);
         return ESP_FAIL;
     }
 
@@ -246,24 +286,32 @@ static esp_err_t pipeline_setup(void)
         s_cap_buf_len[i] = buf.length;
     }
 
-    s_m2m_fd = open(ESP_VIDEO_H264_DEVICE_NAME, O_RDONLY);
+    s_m2m_fd = open(enc_dev, O_RDONLY);
     if (s_m2m_fd < 0)
     {
-        ESP_LOGE(TAG, "open %s failed", ESP_VIDEO_H264_DEVICE_NAME);
+        ESP_LOGE(TAG, "open %s failed", enc_dev);
         return ESP_FAIL;
     }
 
-    set_codec_control(s_m2m_fd, V4L2_CID_MPEG_VIDEO_H264_I_PERIOD, CONFIG_NODE_H264_I_PERIOD);
-    set_codec_control(s_m2m_fd, V4L2_CID_MPEG_VIDEO_BITRATE, CONFIG_NODE_H264_BITRATE);
-    set_codec_control(s_m2m_fd, V4L2_CID_MPEG_VIDEO_H264_MIN_QP, CONFIG_NODE_H264_MIN_QP);
-    set_codec_control(s_m2m_fd, V4L2_CID_MPEG_VIDEO_H264_MAX_QP, CONFIG_NODE_H264_MAX_QP);
+    if (jpeg)
+    {
+        set_codec_control(s_m2m_fd, V4L2_CID_JPEG_COMPRESSION_QUALITY, s_jpeg_quality,
+                          V4L2_CID_JPEG_CLASS);
+    }
+    else
+    {
+        set_codec_control(s_m2m_fd, V4L2_CID_MPEG_VIDEO_H264_I_PERIOD, CONFIG_NODE_H264_I_PERIOD);
+        set_codec_control(s_m2m_fd, V4L2_CID_MPEG_VIDEO_BITRATE, CONFIG_NODE_H264_BITRATE);
+        set_codec_control(s_m2m_fd, V4L2_CID_MPEG_VIDEO_H264_MIN_QP, CONFIG_NODE_H264_MIN_QP);
+        set_codec_control(s_m2m_fd, V4L2_CID_MPEG_VIDEO_H264_MAX_QP, CONFIG_NODE_H264_MAX_QP);
+    }
 
     /* Encoder input side: fed by pointer straight from the capture buffers. */
     memset(&format, 0, sizeof(format));
     format.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
     format.fmt.pix.width = width;
     format.fmt.pix.height = height;
-    format.fmt.pix.pixelformat = V4L2_PIX_FMT_YUV420;
+    format.fmt.pix.pixelformat = cap_pixfmt;
     if (ioctl(s_m2m_fd, VIDIOC_S_FMT, &format) != 0)
     {
         return ESP_FAIL;
@@ -282,7 +330,7 @@ static esp_err_t pipeline_setup(void)
     format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     format.fmt.pix.width = width;
     format.fmt.pix.height = height;
-    format.fmt.pix.pixelformat = V4L2_PIX_FMT_H264;
+    format.fmt.pix.pixelformat = out_pixfmt;
     if (ioctl(s_m2m_fd, VIDIOC_S_FMT, &format) != 0)
     {
         return ESP_FAIL;
@@ -311,8 +359,10 @@ static esp_err_t pipeline_setup(void)
     }
     s_enc_buf_len = buf.length;
 
-    ESP_LOGI(TAG, "pipeline ready: %" PRIu32 "x%" PRIu32 " YUV420 -> H.264 @ %d bit/s GOP %d",
-             width, height, CONFIG_NODE_H264_BITRATE, CONFIG_NODE_H264_I_PERIOD);
+    s_width = width;
+    s_height = height;
+    ESP_LOGI(TAG, "pipeline ready: %" PRIu32 "x%" PRIu32 " -> %s", width, height,
+             jpeg ? "JPEG" : "H.264");
     return ESP_OK;
 }
 
@@ -514,6 +564,12 @@ static void serve_client(int client)
     struct timeval tmo = {.tv_sec = 10, .tv_usec = 0};
     setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &tmo, sizeof(tmo));
 
+    if (xSemaphoreTake(s_session_lock, pdMS_TO_TICKS(3000)) != pdTRUE)
+    {
+        ESP_LOGW(TAG, "camera busy (browser preview open), dropping client");
+        return;
+    }
+
 #if CONFIG_NODE_STREAM_STOPS_WIFI
     /* There is not enough internal DMA-capable RAM on this board to run the
      * capture/encode pipeline and the 2.4 GHz side at once: with WiFi up,
@@ -524,13 +580,14 @@ static void serve_client(int client)
     log_dma_heap("wifi parked");
 #endif
 
-    if (pipeline_setup() != ESP_OK)
+    if (pipeline_setup(CAM_ENC_H264) != ESP_OK)
     {
         ESP_LOGE(TAG, "pipeline bring-up failed, dropping client");
         pipeline_teardown();
 #if CONFIG_NODE_STREAM_STOPS_WIFI
         esp_wifi_start();
 #endif
+        xSemaphoreGive(s_session_lock);
         return;
     }
     log_dma_heap("with pipeline up");
@@ -544,6 +601,7 @@ static void serve_client(int client)
 #if CONFIG_NODE_STREAM_STOPS_WIFI
         esp_wifi_start();
 #endif
+        xSemaphoreGive(s_session_lock);
         return;
     }
 
@@ -572,6 +630,13 @@ static void serve_client(int client)
         }
         frames++;
         bytes += len;
+        {
+            int64_t dt = esp_timer_get_time() - t0;
+            s_stat_viewer = true;
+            s_stat_frame_bytes = (uint32_t)len;
+            s_stat_fps_x10 = (uint32_t)(frames * 1e7 / dt);
+            s_stat_kbits = (uint32_t)(bytes * 8e3 / dt);
+        }
         if ((frames % 100) == 0)
         {
             int64_t dt = esp_timer_get_time() - t0;
@@ -585,9 +650,12 @@ static void serve_client(int client)
     pipeline_teardown();
     ESP_LOGI(TAG, "client gone after %" PRIu32 " frames", frames);
     log_dma_heap("after teardown");
+    s_stat_viewer = false;
+    s_stat_fps_x10 = s_stat_kbits = 0;
 #if CONFIG_NODE_STREAM_STOPS_WIFI
     esp_wifi_start();
 #endif
+    xSemaphoreGive(s_session_lock);
 }
 
 static void stream_server_task(void *arg)
@@ -686,6 +754,7 @@ extern "C" esp_err_t camera_stream_start(void)
         return err;
     }
     s_sensor_present = true;
+    s_session_lock = xSemaphoreCreateMutex();
     log_dma_heap("idle (sensor found, no buffers)");
 
     if (xTaskCreatePinnedToCore(stream_server_task, "h264_stream", 8192, NULL, 5, NULL, 0) != pdPASS)
@@ -693,4 +762,240 @@ extern "C" esp_err_t camera_stream_start(void)
         return ESP_FAIL;
     }
     return ESP_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Browser front end: MJPEG preview for focusing the lens, and a field page
+// that doubles as the range-walk instrument.
+//
+// The lens on these modules is focused by hand, so the useful thing is a live
+// picture plus a number that peaks when the image is sharp. Encoded JPEG size
+// at fixed quality is that number: detail is high-frequency content, and
+// high-frequency content is what survives quantisation, so a sharp frame is a
+// bigger frame. No image processing needed, and it costs nothing to read.
+//
+// MJPEG rather than the H.264 stream because a browser can display
+// multipart/x-mixed-replace natively in an <img>, and cannot play raw Annex-B
+// at all.
+// ---------------------------------------------------------------------------
+
+static esp_err_t preview_open(int quality)
+{
+    if (!s_sensor_present || s_session_lock == NULL)
+    {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (xSemaphoreTake(s_session_lock, pdMS_TO_TICKS(4000)) != pdTRUE)
+    {
+        return ESP_ERR_TIMEOUT; /* the H.264 stream has the camera */
+    }
+
+    s_jpeg_quality = quality;
+    if (pipeline_setup(CAM_ENC_JPEG) != ESP_OK || !session_start())
+    {
+        session_stop();
+        pipeline_teardown();
+        xSemaphoreGive(s_session_lock);
+        return ESP_FAIL;
+    }
+    s_streaming = true;
+    return ESP_OK;
+}
+
+static void preview_close(void)
+{
+    s_streaming = false;
+    session_stop();
+    pipeline_teardown();
+    xSemaphoreGive(s_session_lock);
+}
+
+/* ?q=1..100 -- lower quality means smaller frames, which is what makes the
+ * preview usable over HaLow as well as over the board's own SoftAP. */
+static int query_quality(httpd_req_t *req)
+{
+    char query[32], value[8];
+    int q = CONFIG_NODE_JPEG_QUALITY;
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "q", value, sizeof(value)) == ESP_OK)
+    {
+        q = atoi(value);
+    }
+    return (q < 5) ? 5 : (q > 95 ? 95 : q);
+}
+
+static esp_err_t snapshot_get_handler(httpd_req_t *req)
+{
+    esp_err_t err = preview_open(query_quality(req));
+    if (err != ESP_OK)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            err == ESP_ERR_TIMEOUT ? "camera busy" : "no camera");
+        return ESP_FAIL;
+    }
+
+    /* Auto-exposure needs frames to converge, and a single grab lands while
+     * the image is still dark. Run the pipeline briefly and keep the last
+     * frame -- the preview stream gets this for free by running on. */
+    size_t len = 0;
+    for (int i = 0; i < SNAPSHOT_SETTLE_FRAMES; i++)
+    {
+        if (!encode_frame(&len))
+        {
+            break;
+        }
+        encode_frame_done();
+    }
+
+    esp_err_t ret = ESP_FAIL;
+    if (encode_frame(&len))
+    {
+        s_stat_frame_bytes = (uint32_t)len;
+        httpd_resp_set_type(req, "image/jpeg");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+        ret = httpd_resp_send(req, (const char *)s_enc_buf, len);
+        encode_frame_done();
+    }
+    preview_close();
+    return ret;
+}
+
+#define MJPEG_BOUNDARY "thalowframe"
+
+static esp_err_t preview_get_handler(httpd_req_t *req)
+{
+    esp_err_t err = preview_open(query_quality(req));
+    if (err != ESP_OK)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            err == ESP_ERR_TIMEOUT ? "camera busy" : "no camera");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "multipart/x-mixed-replace;boundary=" MJPEG_BOUNDARY);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    uint32_t frames = 0;
+    int64_t t0 = esp_timer_get_time();
+    char head[96];
+
+    while (true)
+    {
+        size_t len = 0;
+        if (!encode_frame(&len))
+        {
+            break;
+        }
+
+        int n = snprintf(head, sizeof(head),
+                         "\r\n--" MJPEG_BOUNDARY "\r\nContent-Type: image/jpeg\r\n"
+                         "Content-Length: %u\r\n\r\n",
+                         (unsigned)len);
+
+        bool ok = httpd_resp_send_chunk(req, head, n) == ESP_OK &&
+                  httpd_resp_send_chunk(req, (const char *)s_enc_buf, len) == ESP_OK;
+        encode_frame_done();
+        if (!ok)
+        {
+            break; /* browser navigated away */
+        }
+
+        frames++;
+        int64_t dt = esp_timer_get_time() - t0;
+        s_stat_frame_bytes = (uint32_t)len;
+        s_stat_fps_x10 = (uint32_t)(frames * 1e7 / dt);
+        s_stat_kbits = (uint32_t)((uint64_t)len * frames * 8e3 / dt);
+    }
+
+    preview_close();
+    s_stat_fps_x10 = s_stat_kbits = 0;
+    httpd_resp_send_chunk(req, NULL, 0);
+    ESP_LOGI(TAG, "preview closed after %" PRIu32 " frames", frames);
+    return ESP_OK;
+}
+
+static const char CAMERA_PAGE[] = R"HTML(<!doctype html><html><head>
+<meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>T-Halow-P4 camera</title><style>
+:root{color-scheme:dark}
+body{margin:0;padding:12px;background:#111;color:#eee;font:15px/1.4 system-ui,sans-serif}
+h1{font-size:17px;margin:0 0 10px}
+img{width:100%;border-radius:8px;background:#000;display:block}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin:10px 0}
+.card{background:#1c1c1e;border-radius:8px;padding:9px 11px}
+.k{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#8c8c92}
+.v{font-size:22px;font-variant-numeric:tabular-nums;margin-top:2px}
+.bar{height:14px;background:#000;border-radius:7px;overflow:hidden;position:relative;margin-top:6px}
+.bar>i{position:absolute;inset:0 auto 0 0;background:linear-gradient(90deg,#2b6,#7d4);width:0}
+.bar>u{position:absolute;top:0;bottom:0;width:2px;background:#f60}
+button{background:#2c2c2e;color:#eee;border:0;border-radius:7px;padding:9px 13px;font-size:14px;margin-right:6px}
+.ok{color:#6d6}.bad{color:#f66}.warn{color:#fb4}
+</style></head><body>
+<h1>T-Halow-P4 &mdash; focus &amp; range</h1>
+<img id=v alt="camera preview">
+<div class=card style="margin-top:10px">
+  <div class=k>Focus &mdash; turn the lens for the highest number</div>
+  <div class=v><span id=f>-</span> <span style="font-size:13px;color:#8c8c92">kB/frame &nbsp; peak <span id=pk>-</span></span></div>
+  <div class=bar><i id=fb></i><u id=pkb></u></div>
+</div>
+<div class=grid>
+  <div class=card><div class=k>HaLow</div><div class="v" id=lnk>-</div></div>
+  <div class=card><div class=k>RSSI</div><div class=v><span id=rssi>-</span> <span style=font-size:13px>dBm</span></div></div>
+  <div class=card><div class=k>Ping gateway</div><div class=v><span id=rtt>-</span> <span style=font-size:13px>ms</span></div></div>
+  <div class=card><div class=k>Loss</div><div class=v><span id=loss>-</span> <span style=font-size:13px>%</span></div></div>
+  <div class=card><div class=k>Radio rate</div><div class=v><span id=rate>-</span> <span style=font-size:13px>kb/s</span></div></div>
+  <div class=card><div class=k>Video to house</div><div class=v><span id=vid>-</span></div></div>
+</div>
+<button onclick="q=Math.max(10,q-15);start()">lower quality</button>
+<button onclick="q=Math.min(90,q+15);start()">higher quality</button>
+<button onclick="pk=0">reset peak</button>
+<p style="color:#8c8c92;font-size:13px">Preview stops while the H.264 stream is being watched &mdash; the camera does one job at a time.</p>
+<script>
+var q=40,pk=0;
+function start(){document.getElementById('v').src='/preview.mjpg?q='+q+'&t='+Date.now()}
+start();
+setInterval(function(){
+ fetch('/api/link').then(r=>r.json()).then(function(d){
+  var kb=d.frame_bytes/1024;
+  document.getElementById('f').textContent=kb.toFixed(1);
+  if(kb>pk)pk=kb;
+  document.getElementById('pk').textContent=pk.toFixed(1);
+  var scale=Math.max(pk,1)*1.15;
+  document.getElementById('fb').style.width=(100*kb/scale)+'%';
+  document.getElementById('pkb').style.left=(100*pk/scale)+'%';
+  var l=document.getElementById('lnk');
+  l.textContent=d.halow_up?'associated':'DOWN';
+  l.className='v '+(d.halow_up?'ok':'bad');
+  document.getElementById('rssi').textContent=d.rssi;
+  document.getElementById('rate').textContent=d.tx_bitrate;
+  var rt=document.getElementById('rtt');
+  rt.textContent=d.ping_ms<0?'--':d.ping_ms;
+  rt.className=d.ping_ms<0?'bad':(d.ping_ms>250?'warn':'ok');
+  var ls=document.getElementById('loss');
+  ls.textContent=d.loss_pct;
+  ls.className=d.loss_pct>20?'bad':(d.loss_pct>5?'warn':'ok');
+  document.getElementById('vid').textContent=d.viewer?(d.kbits+' kb/s'):'no viewer';
+ }).catch(function(){});
+},1000);
+</script></body></html>)HTML";
+
+static esp_err_t camera_page_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_send(req, CAMERA_PAGE, HTTPD_RESP_USE_STRLEN);
+}
+
+extern "C" void camera_web_register(httpd_handle_t server)
+{
+    static const httpd_uri_t page = {
+        .uri = "/camera", .method = HTTP_GET, .handler = camera_page_handler, .user_ctx = NULL};
+    static const httpd_uri_t preview = {
+        .uri = "/preview.mjpg", .method = HTTP_GET, .handler = preview_get_handler, .user_ctx = NULL};
+    static const httpd_uri_t snapshot = {
+        .uri = "/snapshot.jpg", .method = HTTP_GET, .handler = snapshot_get_handler, .user_ctx = NULL};
+
+    httpd_register_uri_handler(server, &page);
+    httpd_register_uri_handler(server, &preview);
+    httpd_register_uri_handler(server, &snapshot);
 }

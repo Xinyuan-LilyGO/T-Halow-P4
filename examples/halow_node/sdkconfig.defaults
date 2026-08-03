@@ -43,6 +43,13 @@ CONFIG_ESP_VIDEO_ENABLE_ISP=y
 CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE=y
 CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
 CONFIG_ESP_VIDEO_ENABLE_HW_H264_VIDEO_DEVICE=y
+# Hardware JPEG too: a browser can display MJPEG natively but not raw H.264,
+# so focusing the lens from a phone needs this path.
+CONFIG_ESP_VIDEO_ENABLE_HW_JPEG_VIDEO_DEVICE=y
+# Each video device claims a VFS entry (/dev/video0, video10, video11, plus
+# the ISP device); with the console and SPIFFS the default table of 8 is
+# already full, and the last device to register just fails.
+CONFIG_VFS_MAX_COUNT=16
 CONFIG_CAMERA_OV2710=y
 CONFIG_CAMERA_OV2710_AUTO_DETECT=y
 CONFIG_CAMERA_OV2710_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
