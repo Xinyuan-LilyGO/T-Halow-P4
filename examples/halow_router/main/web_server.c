@@ -348,11 +348,21 @@ static esp_err_t resync_post_handler(httpd_req_t *req)
     return httpd_resp_send(req, ok ? "OK" : "FAIL", HTTPD_RESP_USE_STRLEN);
 }
 
+static httpd_handle_t s_server = NULL;
+
+httpd_handle_t web_server_handle(void)
+{
+    return s_server;
+}
+
 esp_err_t web_server_start(void)
 {
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
+    /* The eight below fill the default table exactly; leave room for the
+     * endpoints an application adds through web_server_handle(). */
+    config.max_uri_handlers = 16;
 
     esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK)
@@ -379,6 +389,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &api_wifi_get);
     httpd_register_uri_handler(server, &api_wifi_post);
 
+    s_server = server;
     ESP_LOGI(TAG, "config page up on http://192.168.4.1/");
     return ESP_OK;
 }

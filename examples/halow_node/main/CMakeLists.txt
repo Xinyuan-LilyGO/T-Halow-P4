@@ -3,6 +3,7 @@
 set(router_main ${CMAKE_CURRENT_SOURCE_DIR}/../../halow_router/main)
 
 idf_component_register(SRCS "halow_node_main.cpp"
+                            "camera_stream.cpp"
                             "${router_main}/at_uart.c"
                             "${router_main}/web_server.c"
                     INCLUDE_DIRS "." "${router_main}")

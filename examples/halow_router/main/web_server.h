@@ -8,12 +8,17 @@
 
 #include <stddef.h>
 #include "esp_err.h"
+#include "esp_http_server.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 esp_err_t web_server_start(void);
+
+/* The running server, so an application can register its own endpoints
+ * (NULL before web_server_start succeeds). */
+httpd_handle_t web_server_handle(void);
 
 /*
  * The HaLow role ("ap"/"sta") last set through the config page, from NVS.

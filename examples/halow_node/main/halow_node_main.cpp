@@ -33,6 +33,7 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_ota_ops.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_wifi_remote.h"
 #include "esp_wifi.h"
@@ -45,7 +46,14 @@
 #include "hgic_netif.h"
 
 #include "at_uart.h"
+#include "camera_stream.h"
 #include "web_server.h"
+#include "ping/ping_sock.h"
+
+#if CONFIG_LWIP_IPV4_NAPT_PORTMAP
+#include "lwip/lwip_napt.h"
+#include "lwip/prot/ip.h"
+#endif
 
 extern "C"
 {
@@ -211,6 +219,157 @@ static bool hgic_wait_for_mac(int timeout_ms)
 
 #define DHCPS_OFFER_DNS 0x02
 
+/* Set once the gateway has installed its forwards, so /api/status can say so. */
+static bool s_portmap_up = false;
+
+/*
+ * Range-walk telemetry. RSSI/EVM/rate come free from the connection-state
+ * poll the pump already runs every second; the ping adds the thing RSSI
+ * alone will not tell you -- whether packets are actually still getting
+ * through. Both are readable from a phone on the node's own SoftAP, which
+ * keeps working regardless of what the HaLow link is doing.
+ */
+static esp_ping_handle_t s_ping;
+static volatile int32_t s_ping_ms = -1;
+static volatile uint32_t s_ping_sent, s_ping_lost;
+
+/* Loss over the last PING_WINDOW probes. A lifetime average is the wrong
+ * number to walk with: once a few thousand good pings are banked, the
+ * moment the link actually fails barely moves it, and right after a reboot
+ * a handful of bad seconds dominate it. */
+#define PING_WINDOW 30
+static volatile uint8_t s_ping_hist[PING_WINDOW];
+static volatile uint32_t s_ping_idx;
+
+static void ping_record(bool lost)
+{
+    s_ping_hist[s_ping_idx % PING_WINDOW] = lost ? 1 : 0;
+    s_ping_idx++;
+}
+
+static unsigned ping_recent_loss_pct(void)
+{
+    uint32_t n = s_ping_idx < PING_WINDOW ? s_ping_idx : PING_WINDOW;
+    if (n == 0)
+    {
+        return 0;
+    }
+    uint32_t lost = 0;
+    for (uint32_t i = 0; i < n; i++)
+    {
+        lost += s_ping_hist[i];
+    }
+    return (unsigned)((lost * 100 + n / 2) / n);
+}
+
+static void ping_reply(esp_ping_handle_t hdl, void *args)
+{
+    uint32_t elapsed = 0;
+    esp_ping_get_profile(hdl, ESP_PING_PROF_TIMEGAP, &elapsed, sizeof(elapsed));
+    s_ping_ms = (int32_t)elapsed;
+    s_ping_sent++;
+    ping_record(false);
+}
+
+static void ping_timeout(esp_ping_handle_t hdl, void *args)
+{
+    s_ping_ms = -1;
+    s_ping_sent++;
+    s_ping_lost++;
+    ping_record(true);
+}
+
+static void start_link_probe(const esp_ip4_addr_t *gw)
+{
+    if (s_ping != NULL || gw->addr == 0)
+    {
+        return;
+    }
+    esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
+    cfg.target_addr.u_addr.ip4.addr = gw->addr;
+    cfg.target_addr.type = ESP_IPADDR_TYPE_V4;
+    cfg.count = ESP_PING_COUNT_INFINITE;
+    cfg.interval_ms = 1000;
+    cfg.timeout_ms = 1500;
+
+    esp_ping_callbacks_t cbs = {};
+    cbs.on_ping_success = ping_reply;
+    cbs.on_ping_timeout = ping_timeout;
+
+    if (esp_ping_new_session(&cfg, &cbs, &s_ping) == ESP_OK)
+    {
+        esp_ping_start(s_ping);
+        printf("link probe pinging " IPSTR " every 1s\n", IP2STR(gw));
+    }
+}
+
+/* Prefer the station-list figures; fall back to the event-driven ones. */
+static int link_rssi(void)
+{
+    return hgic.sta_list[0].rssi != 0 ? (int)hgic.sta_list[0].rssi : hgic.status.rssi;
+}
+
+static int link_evm(void)
+{
+    return hgic.sta_list[0].evm != 0 ? (int)hgic.sta_list[0].evm : hgic.status.evm;
+}
+
+/* Everything a phone needs while walking the link out to its limit. */
+static esp_err_t link_get_handler(httpd_req_t *req)
+{
+    bool viewer = false;
+    uint32_t fps_x10 = 0, kbits = 0, frame_bytes = 0;
+    camera_stream_stats(&viewer, &fps_x10, &kbits, &frame_bytes);
+
+    uint32_t sent = s_ping_sent, lost = s_ping_lost;
+    unsigned loss_all = sent ? (unsigned)((lost * 100 + sent / 2) / sent) : 0;
+    unsigned loss_pct = ping_recent_loss_pct();
+
+    char json[320];
+    snprintf(json, sizeof(json),
+             "{\"halow_up\":%s,\"rssi\":%d,\"evm\":%d,\"snr\":%d,\"tx_bitrate\":%d,"
+             "\"ping_ms\":%ld,\"loss_pct\":%u,\"loss_all_pct\":%u,\"pings\":%lu,"
+             "\"stream_enabled\":%s,\"stream_fails\":%lu,"
+             "\"udp_enabled\":%s,\"udp_host\":\"%s\",\"udp_port\":%u,"
+             "\"viewer\":%s,\"fps\":%.1f,\"kbits\":%lu,\"frame_bytes\":%lu}",
+             hgic.status.conn_state ? "true" : "false", link_rssi(), link_evm(),
+             (int)hgic.sta_list[0].rx_snr, hgic.status.tx_bitrate, (long)s_ping_ms,
+             loss_pct, loss_all, (unsigned long)sent,
+             camera_stream_enabled() ? "true" : "false",
+             (unsigned long)camera_stream_failures(),
+             camera_udp_enabled() ? "true" : "false", camera_udp_host(),
+             (unsigned)camera_udp_port(),
+             viewer ? "true" : "false", fps_x10 / 10.0, (unsigned long)kbits,
+             (unsigned long)frame_bytes);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+}
+
+/* What is this node doing right now -- the answer you want when a board is
+ * remote, has no console, and you need to know which image it is running. */
+static esp_err_t status_get_handler(httpd_req_t *req)
+{
+    char json[320];
+    snprintf(json, sizeof(json),
+             "{\"role\":\"%s\",\"personality\":\"%s\",\"built\":\"%s %s\","
+             "\"camera\":\"%s\",\"stream_port\":%d,\"stream_enabled\":%s,\"portmap\":%s,"
+             "\"uptime_s\":%lld,\"heap_dma\":%u,\"heap_dma_largest\":%u}",
+             s_gateway ? "ap" : "sta", s_gateway ? "gateway" : "router",
+             __DATE__, __TIME__, camera_stream_state(), CONFIG_NODE_STREAM_PORT,
+             camera_stream_enabled() ? "true" : "false", s_portmap_up ? "true" : "false",
+             (long long)(esp_timer_get_time() / 1000000),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT),
+             /* the number that actually predicts whether the H.264 encoder
+              * can start: it wants ~90 kB contiguous, and free total says
+              * nothing about that once the heap has fragmented */
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+}
+
 /* Which netif runs the DHCP server: the SoftAP (router) or HaLow (gateway). */
 static esp_netif_t *dhcps_netif(void)
 {
@@ -280,6 +439,25 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
         printf("wifi ip " IPSTR " gw " IPSTR "\n", IP2STR(&e->ip_info.ip), IP2STR(&e->ip_info.gw));
         follow_upstream_dns(s_wifi_netif);
+
+#if CONFIG_LWIP_IPV4_NAPT_PORTMAP && CONFIG_NODE_STREAM_FORWARD
+        /* Punch two ports through our NAT to the field unit: its H.264 stream
+         * so the home LAN can watch, and its config portal so the field unit
+         * can be reconfigured and OTA'd remotely -- over HaLow, which stays
+         * usable even when the far end's own WiFi side is in trouble. */
+        if (s_gateway)
+        {
+            uint32_t target = esp_ip4addr_aton(CONFIG_NODE_STREAM_FORWARD_IP);
+            ip_portmap_add(IP_PROTO_TCP, e->ip_info.ip.addr, CONFIG_NODE_STREAM_PORT,
+                           target, CONFIG_NODE_STREAM_PORT);
+            ip_portmap_add(IP_PROTO_TCP, e->ip_info.ip.addr, CONFIG_NODE_MGMT_FORWARD_PORT,
+                           target, 80);
+            printf("forwarding to %s: tcp :%d -> :%d (stream), tcp :%d -> :80 (portal)\n",
+                   CONFIG_NODE_STREAM_FORWARD_IP, CONFIG_NODE_STREAM_PORT, CONFIG_NODE_STREAM_PORT,
+                   CONFIG_NODE_MGMT_FORWARD_PORT);
+            s_portmap_up = true;
+        }
+#endif
     }
     else if (base == IP_EVENT && id == IP_EVENT_ETH_GOT_IP)
     {
@@ -287,6 +465,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
         printf("halow ip " IPSTR " gw " IPSTR "\n", IP2STR(&e->ip_info.ip), IP2STR(&e->ip_info.gw));
         follow_upstream_dns(s_halow_netif);
+        start_link_probe(&e->ip_info.gw);
     }
 }
 
@@ -374,6 +553,11 @@ static void halow_pump_task(void *arg)
             next_poll = now + 1000;
             hgic_netif_spi_lock();
             hgic_raw_get_connect_state();
+            /* hgic.status.rssi only ever gets filled by an unsolicited
+             * HGIC_EVENT_SIGNAL, which this firmware does not send. The
+             * station list carries a real per-link rssi/evm/snr and can be
+             * asked for, so the range walk has a number to watch. */
+            hgic_raw_get_sta_list();
             hgic_netif_spi_unlock();
         }
 
@@ -514,10 +698,31 @@ extern "C" void app_main(void)
     at_uart_quiet();
     ESP_ERROR_CHECK(web_server_start());
 
+    const httpd_uri_t api_status = {
+        .uri = "/api/status", .method = HTTP_GET, .handler = status_get_handler, .user_ctx = NULL};
+    const httpd_uri_t api_link = {
+        .uri = "/api/link", .method = HTTP_GET, .handler = link_get_handler, .user_ctx = NULL};
+    httpd_register_uri_handler(web_server_handle(), &api_status);
+    httpd_register_uri_handler(web_server_handle(), &api_link);
+    camera_web_register(web_server_handle());
+
     if (halow_ok)
     {
         xTaskCreatePinnedToCore(halow_pump_task, "halow_pump", 6144, NULL, 15, NULL, 1);
     }
+
+#if CONFIG_NODE_CAMERA_STREAM
+    /* Field unit only. The gateway sits indoors routing traffic and has no
+     * camera module; bringing the CSI/ISP/H.264 stack up there costs it the
+     * internal DMA heap that esp_hosted's SDIO uplink needs, which the stall
+     * watchdog answers with a host restart. Kept before the rollback cancel
+     * on purpose: if camera bring-up wedges a board, its next boot is the
+     * previous image. */
+    if (!s_gateway)
+    {
+        camera_stream_start();
+    }
+#endif
 
     /* Portal is serving: this image can always be OTA'd/rebooted from here. */
     esp_ota_mark_app_valid_cancel_rollback();

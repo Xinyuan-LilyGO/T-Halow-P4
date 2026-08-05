@@ -68,4 +68,83 @@ config NODE_HALOW_STATIC_GW
     depends on !NODE_HALOW_USE_DHCP
     default "10.99.0.1"
 
+comment "Camera streaming: runs only when a CSI sensor answers at boot."
+
+config NODE_CAMERA_STREAM
+    bool "Serve an H.264 camera stream when a sensor is present"
+    default y
+    help
+        Hardware pipeline (CSI -> ISP -> H.264) served as a raw Annex-B
+        elementary stream to one TCP client:
+        ffplay -fflags nobuffer -f h264 tcp://<node>:8554
+
+config NODE_STREAM_PORT
+    int "TCP port for the H.264 stream"
+    default 8554
+
+config NODE_STREAM_STOPS_WIFI
+    bool "Park the 2.4 GHz radio while a viewer is connected"
+    default n
+    help
+        Stops WiFi for the duration of a viewing session, on the theory
+        that it frees internal DMA-capable RAM for the pipeline. Measured
+        on this board it does not: the free DMA heap went down, not up.
+        Left here as a switch, off by default, since a field unit that
+        never serves its SoftAP may still want the radio quiet.
+
+config NODE_JPEG_QUALITY
+    int "Default JPEG quality for the browser preview (5-95)"
+    range 5 95
+    default 40
+    help
+        The /camera page can raise or lower this live; the default is chosen
+        to keep frames small enough to preview over HaLow as well as over
+        the node's own SoftAP.
+
+config NODE_H264_BITRATE
+    int "H.264 target bitrate (bit/s)"
+    default 800000
+    range 25000 2500000
+    help
+        Keep below what the HaLow link sustains (~1-4 Mbit/s measured at
+        2 MHz bandwidth) or latency grows without bound.
+
+config NODE_H264_I_PERIOD
+    int "H.264 I-frame period (frames)"
+    default 50
+    range 1 120
+
+config NODE_H264_MIN_QP
+    int "H.264 minimum QP"
+    default 25
+    range 1 51
+
+config NODE_H264_MAX_QP
+    int "H.264 maximum QP"
+    default 48
+    range NODE_H264_MIN_QP 51
+
+config NODE_STREAM_FORWARD
+    bool "Gateway personality: forward the stream port over HaLow"
+    default y
+    help
+        NAT port-map so the home LAN can watch the camera through this
+        board: <gateway wifi ip>:8554 -> <camera halow ip>:8554.
+
+config NODE_STREAM_FORWARD_IP
+    string "HaLow address of the camera node"
+    depends on NODE_STREAM_FORWARD
+    default "10.99.0.2"
+    help
+        First DHCP lease the gateway hands out; with a single field unit
+        on the BSS that is always the camera.
+
+config NODE_MGMT_FORWARD_PORT
+    int "Gateway port mapped to the field unit's config portal"
+    depends on NODE_STREAM_FORWARD
+    default 8080
+    help
+        http://<gateway>:8080/ is the field unit's own page, reached over
+        HaLow -- remote reconfiguration and OTA without going to the camera.
+
 endmenu
